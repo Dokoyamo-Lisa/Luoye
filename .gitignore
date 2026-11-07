@@ -1,0 +1,14 @@
+build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+.DS_Store
+
+# Local build and signing artifacts
+/work/
+*.ipa
+*.xcarchive/
+*.mobileprovision
+*.p12
+.env
+.env.*
