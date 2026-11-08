@@ -62,6 +62,7 @@ struct PagedReader: UIViewControllerRepresentable {
         private let pageControllers = NSHashTable<PageController>.weakObjects()
         private var reportID = UUID()
         private var laidOutFooterTitle = true
+        private var jumpSnapshot: UIView?
         /// 当前屏幕上显示的位置
         private var shown: ReadingPosition?
 
@@ -141,12 +142,25 @@ struct PagedReader: UIViewControllerRepresentable {
             let index = layout(for: chapter).page(containing: position.offset)
             let next = page(chapter: chapter, page: index)
             guard let controller = pageViewController else { return }
-            if shown == nil || UIAccessibility.isReduceMotionEnabled {
-                controller.setViewControllers([next], direction: .forward, animated: false)
-            } else {
-                // 目录跳转、换字号等：旧页淡出、新页淡入，不生硬地跳。
-                UIView.transition(with: controller.view, duration: 0.18, options: [.transitionCrossDissolve, .allowUserInteraction, .beginFromCurrentState]) {
-                    controller.setViewControllers([next], direction: .forward, animated: false)
+            // A snapshot fades away after the replacement has settled. UIKit's
+            // transition(with:) can animate the page controller's internal scroll
+            // view as well, producing a stray page-turn during chapter jumps.
+            jumpSnapshot?.removeFromSuperview()
+            jumpSnapshot = nil
+            let snapshot = shown != nil && !UIAccessibility.isReduceMotionEnabled
+                ? controller.view.snapshotView(afterScreenUpdates: false) : nil
+            controller.setViewControllers([next], direction: .forward, animated: false)
+            if let snapshot {
+                snapshot.frame = controller.view.bounds
+                snapshot.isUserInteractionEnabled = false
+                controller.view.addSubview(snapshot)
+                jumpSnapshot = snapshot
+                UIView.animate(withDuration: 0.18, delay: 0,
+                               options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+                    snapshot.alpha = 0
+                } completion: { [weak self, weak snapshot] _ in
+                    snapshot?.removeFromSuperview()
+                    if self?.jumpSnapshot === snapshot { self?.jumpSnapshot = nil }
                 }
             }
             // 重新排版、跳转时只翻到含这个位置的那一页，不改写阅读位置：
@@ -163,12 +177,14 @@ struct PagedReader: UIViewControllerRepresentable {
             let length = layout(for: chapter).storage.length
             let expected = parent.position
             let report = UUID(); reportID = report
+            // Commit the visible page before UIKit releases the transition. A later
+            // SwiftUI update must never restore the page that was visible before a fast swipe.
+            if expected != position { parent.position = position }
             DispatchQueue.main.async { [weak self] in
                 defer { afterReport?() }
-                guard let self, self.isActive, self.reportID == report, self.parent.position == expected else { return }
+                guard let self, self.isActive, self.reportID == report, self.parent.position == position else { return }
                 self.parent.onChapterLength(chapter, length)
                 self.parent.onPageRange(pageRange)
-                if expected != position { self.parent.position = position }
             }
             // 只留前后相邻的章节，长书也不会越占越多内存。
             layouts = layouts.filter { abs($0.key - chapter) <= 1 }
@@ -251,6 +267,7 @@ struct PagedReader: UIViewControllerRepresentable {
         func deactivate() {
             guard isActive else { return }
             isActive = false
+            jumpSnapshot?.removeFromSuperview(); jumpSnapshot = nil
             if transitionPosition != nil {
                 transitionPosition = nil
                 let callback = parent.onInteractionChanged, owner = interactionID

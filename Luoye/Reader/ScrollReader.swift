@@ -16,6 +16,7 @@ struct ScrollReader: UIViewRepresentable {
     var onTap: () -> Void
     var onReachEnd: () -> Void
     var onChapterLength: (Int, Int) -> Void = { _, _ in }
+    var onManualScrollChanged: (UUID, Bool) -> Void = { _, _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
@@ -40,6 +41,8 @@ struct ScrollReader: UIViewRepresentable {
 
     static func dismantleUIView(_ scrollView: UIScrollView, coordinator: Coordinator) {
         coordinator.stopTicking()
+        coordinator.endManualScrollAfterDismantle()
+        scrollView.delegate = nil
     }
 
     final class Coordinator: NSObject, UIScrollViewDelegate {
@@ -51,6 +54,7 @@ struct ScrollReader: UIViewRepresentable {
         private var builtStyle: ReaderStyle?
         private var builtSize: CGSize?
         private var builtInsets: UIEdgeInsets?
+        private var jumpSnapshot: UIView?
         private var isLayingOut = false
         /// 最近一次由滚动上报出去的位置；外面改的位置（如目录跳转）与它不同，就重新铺
         private var reported: ReadingPosition?
@@ -67,6 +71,8 @@ struct ScrollReader: UIViewRepresentable {
         private var shortChapterDistance: CGFloat = 0
         private var dragStartY: CGFloat = 0
         private var draggedForward = false
+        private let interactionID = UUID()
+        private var manualScrollActive = false
 
         init(parent: ScrollReader) {
             self.parent = parent
@@ -79,12 +85,22 @@ struct ScrollReader: UIViewRepresentable {
             updateTicking()
             guard textWidth > 0, parent.size.height > 0, !parent.content.chapters.isEmpty, let scrollView else { return }
             if parent.style != builtStyle || parent.size != builtSize || parent.insets != builtInsets || parent.position != reported {
-                if builtStyle == nil || UIAccessibility.isReduceMotionEnabled {
-                    build(from: parent.position)
-                } else {
-                    // 目录跳转、换字号等：淡入淡出地换过去。
-                    UIView.transition(with: scrollView, duration: 0.18, options: [.transitionCrossDissolve, .allowUserInteraction, .beginFromCurrentState]) {
-                        self.build(from: self.parent.position)
+                jumpSnapshot?.removeFromSuperview()
+                jumpSnapshot = nil
+                let snapshot = builtStyle != nil && !UIAccessibility.isReduceMotionEnabled
+                    ? scrollView.snapshotView(afterScreenUpdates: false) : nil
+                build(from: parent.position)
+                if let snapshot {
+                    snapshot.frame = scrollView.bounds
+                    snapshot.isUserInteractionEnabled = false
+                    scrollView.addSubview(snapshot)
+                    jumpSnapshot = snapshot
+                    UIView.animate(withDuration: 0.18, delay: 0,
+                                   options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]) {
+                        snapshot.alpha = 0
+                    } completion: { [weak self, weak snapshot] _ in
+                        snapshot?.removeFromSuperview()
+                        if self?.jumpSnapshot === snapshot { self?.jumpSnapshot = nil }
                     }
                 }
             }
@@ -220,6 +236,7 @@ struct ScrollReader: UIViewRepresentable {
 
         func stopTicking() {
             boundaryRevision = UUID()
+            jumpSnapshot?.removeFromSuperview(); jumpSnapshot = nil
             displayLink?.invalidate()
             displayLink = nil
             lastTick = nil; carry = 0
@@ -273,6 +290,10 @@ struct ScrollReader: UIViewRepresentable {
 
         func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
             dragStartY = scrollView.contentOffset.y; draggedForward = false
+            if !manualScrollActive {
+                manualScrollActive = true
+                parent.onManualScrollChanged(interactionID, true)
+            }
         }
 
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -290,6 +311,7 @@ struct ScrollReader: UIViewRepresentable {
         func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
             reportPosition()
             if draggedForward { notifyEndIfNeeded() }
+            endManualScroll()
         }
 
         func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -297,7 +319,21 @@ struct ScrollReader: UIViewRepresentable {
             if !decelerate {
                 reportPosition()
                 if draggedForward { notifyEndIfNeeded() }
+                endManualScroll()
             }
+        }
+
+        private func endManualScroll() {
+            guard manualScrollActive else { return }
+            manualScrollActive = false
+            parent.onManualScrollChanged(interactionID, false)
+        }
+
+        func endManualScrollAfterDismantle() {
+            guard manualScrollActive else { return }
+            manualScrollActive = false
+            let callback = parent.onManualScrollChanged, owner = interactionID
+            DispatchQueue.main.async { callback(owner, false) }
         }
 
         /// 正文区顶端那一行属于哪一章、章内第几个字。

@@ -514,7 +514,7 @@ private extension AnyTransition {
     static func pageSwap(forward: Bool) -> AnyTransition {
         .asymmetric(
             insertion: .opacity.combined(with: .offset(x: forward ? 24 : -24)),
-            removal: .opacity.combined(with: .offset(x: forward ? 24 : -24))
+            removal: .opacity.combined(with: .offset(x: forward ? -24 : 24))
         )
     }
 }

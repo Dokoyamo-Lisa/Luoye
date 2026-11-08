@@ -148,6 +148,28 @@ import UIKit
         speed(40)
         try? await Task.sleep(for: .milliseconds(200))
         check(scrollCoordinator.displayTickCount > pausedTicks && scroll.contentOffset.y - pausedOffset < 15, "resuming restarts smoothly without replaying paused time")
+        let beforeSlow = scroll.contentOffset.y
+        speed(10)
+        try? await Task.sleep(for: .milliseconds(250))
+        let slowDistance = scroll.contentOffset.y - beforeSlow
+        let beforeFast = scroll.contentOffset.y
+        speed(100)
+        try? await Task.sleep(for: .milliseconds(250))
+        let fastDistance = scroll.contentOffset.y - beforeFast
+        check(slowDistance > 0 && fastDistance > slowDistance * 3, "changing scroll speed adjusts movement without pausing")
+        var dragEvents: [Bool] = []
+        scrollCoordinator.parent = ScrollReader(content: content, style: style, size: scrollParent.size, insets: changedInsets,
+                                                position: scrollParent.$position, speed: 0, onTap: {}, onReachEnd: {},
+                                                onManualScrollChanged: { _, active in dragEvents.append(active) })
+        scrollCoordinator.refresh()
+        scrollCoordinator.scrollViewWillBeginDragging(scroll)
+        scrollCoordinator.scrollViewDidEndDragging(scroll, willDecelerate: true)
+        check(dragEvents == [true], "automatic scrolling remains paused during swipe deceleration")
+        scrollCoordinator.scrollViewDidEndDecelerating(scroll)
+        check(dragEvents == [true, false], "automatic scrolling resumes only after deceleration")
+        scrollCoordinator.scrollViewWillBeginDragging(scroll)
+        scrollCoordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
+        check(dragEvents == [true, false, true, false], "a swipe without deceleration resumes on release")
         scrollCoordinator.stopTicking(); scroll.delegate = nil
         let report: [String: Any] = ["success": checks.allSatisfy { $0["passed"] as? Bool == true }, "checks": checks]
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: FileManager.default.temporaryDirectory.appending(path: "LuoyeReaderMotionVerification.json"), options: .atomic) }

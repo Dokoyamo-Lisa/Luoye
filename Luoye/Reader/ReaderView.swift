@@ -41,6 +41,8 @@ struct ReaderView: View {
     @State private var forwardTurns = 0
     @State private var pageInteractionID: UUID?
     @State private var pageInteractionRevision = 0
+    @State private var scrollInteractionID: UUID?
+    @State private var adjustingScrollSpeed = false
     @State private var pageShownAt = Date.now
     @State private var showingSpeedDial = false
     /// 翻页模式下当前页的字符范围；书签落在这里就算在这一页
@@ -98,7 +100,13 @@ struct ReaderView: View {
     }
 
     private var automaticReadingPaused: Bool {
-        isInteractionSuspended || scenePhase != .active || showingChrome || showingSpeedDial || noteText != nil || pageInteractionID != nil
+        if isInteractionSuspended || scenePhase != .active || noteText != nil { return true }
+        if autoMode == .scroll {
+            // A tap pauses reading through the open menu. The speed dial itself
+            // still previews changes live while it is being dragged.
+            return scrollInteractionID != nil || (showingChrome && !adjustingScrollSpeed)
+        }
+        return showingChrome || showingSpeedDial || pageInteractionID != nil
     }
 
     private var scheme: ColorScheme { theme.scheme(system: systemScheme) }
@@ -130,7 +138,22 @@ struct ReaderView: View {
                                 speed: autoMode == .scroll && !automaticReadingPaused ? CGFloat(scrollLines) * style.linePitch / 60 : 0,
                                 onTap: toggleChrome,
                                 onReachEnd: reachEnd,
-                                onChapterLength: recordChapterLength
+                                onChapterLength: recordChapterLength,
+                                onManualScrollChanged: { owner, active in
+                                    if active {
+                                        scrollInteractionID = owner
+                                        if autoMode == .scroll && showingChrome {
+                                            withAnimation(.easeOut(duration: 0.18)) {
+                                                showingChrome = false
+                                                panel = nil
+                                                menuExpanded = false
+                                                showingSpeedDial = false
+                                            }
+                                        }
+                                    } else if scrollInteractionID == owner {
+                                        scrollInteractionID = nil
+                                    }
+                                }
                             )
                         } else {
                             PagedReader(
@@ -158,7 +181,6 @@ struct ReaderView: View {
                             )
                         }
                     }
-                    .animation(.easeOut(duration: 0.18), value: usesScroll)
                     .ignoresSafeArea()
                 }
                 .transition(.opacity)
@@ -269,7 +291,6 @@ struct ReaderView: View {
     private func chrome(content: BookContent) -> some View {
         let paper = Color(style.background)
         let current = min(position.chapter, content.chapters.count - 1)
-        let dimmed = panel != nil || menuExpanded
         // 常驻在最上层；收起时里面是空的，点击会直接落到正文上。
         return VStack(spacing: 12) {
             if showingChrome {
@@ -308,15 +329,8 @@ struct ReaderView: View {
         .padding(.bottom, 26)
         .tint(Color(style.text))
         .foregroundStyle(Color(style.text))
-        .background {
-            // 菜单呼出时拦截正文点击，避免边缘误翻页。
-            if showingChrome {
-                Color.clear
-                    .contentShape(.rect)
-                    .ignoresSafeArea()
-                    .onTapGesture { if dimmed { collapse() } else { toggleChrome() } }
-            }
-        }
+        // Empty space stays touch-transparent, including while a card is open.
+        // A vertical swipe can therefore reach ScrollReader and dismiss the menu.
     }
 
     /// 读到全书的几成（0…1，按章和章内位置估算）。
@@ -603,7 +617,8 @@ struct ReaderView: View {
                 title: "滚动速度",
                 reading: scrollLines.formatted(.number.precision(.fractionLength(1))),
                 unit: "行 / 分钟",
-                label: { "\(Int(AutoMode.scrollLines(atSpeed: $0).rounded()))" }
+                label: { "\(Int(AutoMode.scrollLines(atSpeed: $0).rounded()))" },
+                onAdjustmentChanged: { adjustingScrollSpeed = $0 }
             )
         case .pages:
             SpeedDial(
@@ -984,8 +999,7 @@ private struct ScrollFooter: View {
         HStack {
             Text(chapterTitle)
                 .lineLimit(1)
-                .id(chapterTitle)
-                .transition(.opacity)
+                .contentTransition(.opacity)
             Spacer(minLength: 12)
             Text(progress)
                 .monospacedDigit()

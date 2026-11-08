@@ -52,6 +52,7 @@ struct SpeedDial: View {
     let unit: String
     /// 长刻度下方的小字：给出某个位置对应的实际速度
     let label: (Double) -> String
+    var onAdjustmentChanged: (Bool) -> Void = { _ in }
 
     @State private var lastTranslation: CGFloat?
     @State private var tick = 0
@@ -93,7 +94,7 @@ struct SpeedDial: View {
             .impact(flexibility: .soft, intensity: 0.1 + 0.3 * speed)
         }
         .sensoryFeedback(.impact(flexibility: .rigid, intensity: 0.4), trigger: hitLimit)
-        .onDisappear { lastTranslation = nil }
+        .onDisappear { lastTranslation = nil; onAdjustmentChanged(false) }
         .accessibilityElement()
         .accessibilityLabel(title)
         .accessibilityValue("\(reading) \(unit)")
@@ -155,6 +156,7 @@ struct SpeedDial: View {
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                if lastTranslation == nil { onAdjustmentChanged(true) }
                 defer { lastTranslation = value.translation.width }
                 // 每次落指都重新量起，不沿用上一次的位置，免得数值跳变。
                 guard value.translation != .zero, let last = lastTranslation else { return }
@@ -167,7 +169,7 @@ struct SpeedDial: View {
                 if Int(new / Self.detent) != Int(old / Self.detent) { tick += 1 }
                 if (new == 1 || new == 0), new != old { hitLimit += 1 }
             }
-            .onEnded { _ in lastTranslation = nil }
+            .onEnded { _ in lastTranslation = nil; onAdjustmentChanged(false) }
     }
 }
 

@@ -7,6 +7,10 @@ struct WenkuDetailView: View {
         let book: Book
         let chapter: (title: String, index: Int)?
     }
+    private struct OnlineSelection: Identifiable {
+        let id = UUID()
+        let index: Int
+    }
     let book: WenkuBook
     @Environment(BrowsingHistoryStore.self) private var history
     @Environment(WebsiteShelfStore.self) private var websiteShelf
@@ -23,6 +27,7 @@ struct WenkuDetailView: View {
     @State private var error: String?
     @State private var notice: String?
     @State private var readingSelection: ReadingSelection?
+    @State private var onlineSelection: OnlineSelection?
     @State private var login = false
 
     private var display: WenkuBook { details ?? book }
@@ -107,7 +112,7 @@ struct WenkuDetailView: View {
                     .accessibilityLabel(alreadySaved ? "已在书斋" : "加入书斋")
                 }
 
-                Text("使用文库提供的 TXT 版本，加入后可离线阅读。")
+                Text("在线阅读按章加载并缓存；加入书斋会下载完整 TXT，供离线阅读。")
                     .font(.serif(12))
                     .foregroundStyle(.secondary)
 
@@ -251,6 +256,9 @@ struct WenkuDetailView: View {
         .fullScreenCover(item: $readingSelection) { selection in
             ReaderView(book: selection.book, startChapter: selection.chapter)
         }
+        .fullScreenCover(item: $onlineSelection) { selection in
+            WenkuOnlineReader(book: display, chapters: chapters, initialIndex: selection.index)
+        }
     }
 
     private func load() async {
@@ -275,6 +283,13 @@ struct WenkuDetailView: View {
     }
 
     private func startStore(read: Bool, startChapter: (title: String, index: Int)? = nil) {
+        if read, existingShelfBook == nil, !chapters.isEmpty {
+            guard service.authenticated else { login = true; return }
+            let savedID = UserDefaults.standard.integer(forKey: "luoye.wenku.online.\(service.accountKey ?? "anonymous").\(book.id).lastChapter")
+            let resume = chapters.firstIndex { $0.id == savedID } ?? 0
+            onlineSelection = OnlineSelection(index: startChapter?.index ?? resume)
+            return
+        }
         guard downloadTask == nil else { return }
         let request = UUID(); downloadRequest = request
         downloadTask = Task { await store(read: read, startChapter: startChapter, request: request) }
