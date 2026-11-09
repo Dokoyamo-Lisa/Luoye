@@ -18,6 +18,8 @@ struct BookshelfView: View {
     @State private var failedImports: [String] = []
     @State private var bookToRemove: Book?
     @State private var readingBook: Book?
+    /// 打开书时从封面放大成阅读页，合上时缩回封面
+    @Namespace private var bookZoom
     @State private var wenkuLogin = false
     @State private var zlibLogin = false
 
@@ -68,6 +70,7 @@ struct BookshelfView: View {
             .navigationDestination(for: ZLibBook.self) { ZLibDetailView(book: $0) }
             .fullScreenCover(item: $readingBook) { book in
                 ReaderView(book: book)
+                    .navigationTransition(.zoom(sourceID: book.id, in: bookZoom))
             }
             .sheet(isPresented: $wenkuLogin) { WenkuLoginView() }
             .sheet(isPresented: $zlibLogin) { ZLibLoginView() }
@@ -252,7 +255,7 @@ struct BookshelfView: View {
         ) {
             ForEach(books) { book in
                 Button { readingBook = book } label: {
-                    BookTile(book: book, large: sizeClass == .regular)
+                    BookTile(book: book, large: sizeClass == .regular, zoom: bookZoom)
                 }
                 .buttonStyle(PressStyle())
                 .contextMenu {
@@ -297,10 +300,12 @@ struct BookshelfView: View {
 private struct BookTile: View {
     let book: Book
     var large = false
+    let zoom: Namespace.ID
 
     var body: some View {
         VStack(alignment: .leading, spacing: large ? 10 : 8) {
             BookCover(book: book)
+                .matchedTransitionSource(id: book.id, in: zoom) { $0.clipShape(.rect(cornerRadius: 3)) }
             VStack(alignment: .leading, spacing: 2) {
                 Text(book.title)
                     .font(.serif(large ? 15 : 13, medium: true))

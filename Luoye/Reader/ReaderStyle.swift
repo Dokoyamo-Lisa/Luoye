@@ -117,12 +117,27 @@ struct ReaderStyle: Equatable {
         let byline = recognizesByline ? paragraphs.first.flatMap { Self.isByline($0) ? InlineMark.plain($0) : nil } : nil
 
         let heading = UIFont(name: "NotoSerifSC-Medium", size: fontSize * 1.3) ?? .boldSystemFont(ofSize: fontSize * 1.3)
-        // 标题占两行高，字放在这两行的正中间（默认会贴着底部）；没有署名时下面空一行再接正文。
-        result.append(NSAttributedString(string: chapter.title + "\n", attributes: [
+        let headingAttributes: [NSAttributedString.Key: Any] = [
             .font: heading, .foregroundColor: text,
             .baselineOffset: (pitch * 2 - heading.lineHeight) / 2,
             .paragraphStyle: fixedLines(2, alignment: .center, spacingAfter: byline == nil ? pitch : 0),
-        ]))
+        ]
+        if let parts = ChapterTitle.ranges(chapter.title) {
+            // 带卷名的章名：卷名一行小字在上，章名作标题。
+            // 只把两者之间的第一个空白换成换行，总字数不变，存过的阅读位置和书签不会错开。
+            let title = chapter.title
+            let small = UIFont(name: "NotoSerifSC-Regular", size: fontSize * 0.8) ?? body
+            var separator = String(title[parts.separator])
+            separator.replaceSubrange(separator.startIndex ... separator.startIndex, with: "\n")
+            result.append(NSAttributedString(string: String(title[parts.volume]) + separator, attributes: [
+                .font: small, .foregroundColor: secondary, .kern: fontSize * 0.15,
+                .paragraphStyle: fixedLines(1, alignment: .center, spacingAfter: 0),
+            ]))
+            result.append(NSAttributedString(string: String(title[parts.name]) + "\n", attributes: headingAttributes))
+        } else {
+            // 标题占两行高，字放在这两行的正中间（默认会贴着底部）；没有署名时下面空一行再接正文。
+            result.append(NSAttributedString(string: chapter.title + "\n", attributes: headingAttributes))
+        }
 
         if let first = byline {
             paragraphs.removeFirst()
@@ -321,5 +336,36 @@ struct WindowColorScheme: ViewModifier {
 
     func body(content: Content) -> some View {
         content.environment(\.systemColorScheme, scheme)
+    }
+}
+
+/// 章名里常带着卷名，如「第一卷 来一份翻转苹果塔 国王饼的秘密」。
+/// 拆成卷名和章名：正文里卷名作小字、章名作标题，目录按卷分组，页脚只写章名。
+enum ChapterTitle {
+    private static let number = "[0-9０-９零〇一二三四五六七八九十百千万萬两兩]+"
+    /// 「第一卷」「卷三」这样的卷号
+    private static let volumeMark = try! NSRegularExpression(pattern: "^(?:第\(number)[卷部集]|卷\(number))$")
+    /// 第二段若已是「第三章」「序章」之类，卷名就只到卷号为止
+    private static let chapterMark = try! NSRegularExpression(
+        pattern: "^(?:第\(number)[章回节節话話篇幕折]|序[章言幕曲]?|楔子|引子|前言|尾声|尾聲|后记|後記|终章|終章|番外|外传|外傳|插曲|间章|間章)")
+
+    /// 卷名、分隔空白、章名在原文里的位置；不是「卷名 + 章名」的写法返回 nil。
+    static func ranges(_ title: String) -> (volume: Range<String.Index>, separator: Range<String.Index>, name: Range<String.Index>)? {
+        let tokens = title.ranges(of: /\S+/)
+        guard tokens.count >= 2, matches(volumeMark, String(title[tokens[0]])) else { return nil }
+        // 「第一卷 来一份翻转苹果塔 国王饼的秘密」：卷号后面跟着卷名，再后面才是章名。
+        let volumeTokens = tokens.count >= 3 && !matches(chapterMark, String(title[tokens[1]])) ? 2 : 1
+        let volumeEnd = tokens[volumeTokens - 1].upperBound
+        let nameStart = tokens[volumeTokens].lowerBound
+        return (title.startIndex ..< volumeEnd, volumeEnd ..< nameStart, nameStart ..< title.endIndex)
+    }
+
+    static func parts(_ title: String) -> (volume: String?, name: String) {
+        guard let ranges = ranges(title) else { return (nil, title) }
+        return (String(title[ranges.volume]), String(title[ranges.name]))
+    }
+
+    private static func matches(_ regex: NSRegularExpression, _ text: String) -> Bool {
+        regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
     }
 }

@@ -13,6 +13,39 @@ extension View {
     }
 }
 
+/// 底部胶囊上方的卡片由外层统一画一块玻璃、统一裁切；里面的目录、显示、自动阅读只画内容。
+/// 这样换卡片时是同一张卡片平滑地变高变矮，里面的字在卡片内淡入淡出，不会伸到卡片外面。
+private struct CardChromelessKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var readerCardChromeless: Bool {
+        get { self[CardChromelessKey.self] }
+        set { self[CardChromelessKey.self] = newValue }
+    }
+}
+
+private struct CardGlass<S: Shape>: ViewModifier {
+    @Environment(\.readerCardChromeless) private var chromeless
+    let paper: Color
+    let shape: S
+
+    func body(content: Content) -> some View {
+        if chromeless {
+            content
+        } else {
+            content.paperGlass(paper, in: shape)
+        }
+    }
+}
+
+extension View {
+    func cardGlass(_ paper: Color, in shape: some Shape) -> some View {
+        modifier(CardGlass(paper: paper, shape: shape))
+    }
+}
+
 /// 底部居中的一条小胶囊：目录、显示、自动、书签。前三个在胶囊上方弹出卡片，书签直接加减。
 struct ReaderToolbar: View {
     @Binding var panel: ReaderPanel?
@@ -71,6 +104,7 @@ struct ReaderToolbar: View {
 
 /// 弹出卡片的外框：统一圆角、留白和玻璃。
 struct ReaderCard<Content: View>: View {
+    @Environment(\.readerCardChromeless) private var chromeless
     let paper: Color
     @ViewBuilder var content: Content
 
@@ -78,8 +112,8 @@ struct ReaderCard<Content: View>: View {
         content
             .padding(.horizontal, 20)
             .padding(.vertical, 18)
-            .frame(maxWidth: 400)
-            .paperGlass(paper, in: .rect(cornerRadius: 26))
+            .frame(maxWidth: chromeless ? .infinity : 400)
+            .cardGlass(paper, in: .rect(cornerRadius: 26))
     }
 }
 
@@ -302,6 +336,8 @@ struct FoldingMenuItems: View {
     }
 
     @State private var page = Page.main
+    /// 卡片当前高度：换页时由它带着卡片平滑地变高变矮
+    @State private var cardHeight: CGFloat?
     @State private var brightness = Self.screen?.brightness ?? 0.5
 
     private static let width: CGFloat = 248
@@ -311,13 +347,26 @@ struct FoldingMenuItems: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            switch page {
-            case .main: mainPage.transition(.pageSwap(forward: false))
-            case .display: displayPage.transition(.pageSwap(forward: true))
-            case .auto: autoPage.transition(.pageSwap(forward: true))
+        // 一级页在左、二级页在右：进二级时一级往左滑出、二级从右滑入，回来时反过来。
+        // 两页叠在同一处（不是上下排），卡片高度平滑过渡，滑出卡片的部分裁掉。
+        ZStack(alignment: .top) {
+            Group {
+                switch page {
+                case .main: mainPage.transition(.pageSide(-1))
+                case .display: displayPage.transition(.pageSide(1))
+                case .auto: autoPage.transition(.pageSide(1))
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                if let old = cardHeight, abs(old - height) > 0.5 {
+                    withAnimation(.spring(duration: 0.38, bounce: 0.06)) { cardHeight = height }
+                } else if cardHeight == nil {
+                    cardHeight = height
+                }
             }
         }
+        .frame(height: cardHeight, alignment: .top)
         .padding(6)
         .frame(width: Self.width)
         .clipShape(.rect(cornerRadius: 24))
@@ -510,11 +559,12 @@ private struct MenuRowStyle: ButtonStyle {
 }
 
 private extension AnyTransition {
-    /// 卡片里一、二级互换：进下一级从右边滑入，回上一级从左边滑入。
-    static func pageSwap(forward: Bool) -> AnyTransition {
+    /// 卡片里一、二级互换：一级页固定在左边（side = -1），二级页在右边（side = 1），
+    /// 进出都朝自己那一侧，两页永远反向滑动，不会撞在一起。
+    static func pageSide(_ side: CGFloat) -> AnyTransition {
         .asymmetric(
-            insertion: .opacity.combined(with: .offset(x: forward ? 24 : -24)),
-            removal: .opacity.combined(with: .offset(x: forward ? -24 : 24))
+            insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.05)).combined(with: .offset(x: 40 * side)),
+            removal: .opacity.animation(.easeOut(duration: 0.14)).combined(with: .offset(x: 40 * side))
         )
     }
 }

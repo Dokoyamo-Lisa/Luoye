@@ -28,6 +28,7 @@ struct ScrollReader: UIViewRepresentable {
         scrollView.contentInsetAdjustmentBehavior = .never
         scrollView.delegate = context.coordinator
         let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handleTap))
+        tap.delegate = context.coordinator
         scrollView.addGestureRecognizer(tap)
         context.coordinator.scrollView = scrollView
         context.coordinator.startTicking()
@@ -45,7 +46,7 @@ struct ScrollReader: UIViewRepresentable {
         scrollView.delegate = nil
     }
 
-    final class Coordinator: NSObject, UIScrollViewDelegate {
+    final class Coordinator: NSObject, UIScrollViewDelegate, UIGestureRecognizerDelegate {
         var parent: ScrollReader
         weak var scrollView: UIScrollView?
 
@@ -357,6 +358,11 @@ struct ScrollReader: UIViewRepresentable {
 
         @objc func handleTap() {
             parent.onTap()
+        }
+
+        /// 正文还在惯性滑动时，点一下只是让它停住，不呼出菜单。
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            !(scrollView?.isDecelerating ?? false)
         }
     }
 }

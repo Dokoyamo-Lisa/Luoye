@@ -36,6 +36,10 @@ struct ReaderView: View {
     /// 折叠菜单是否展开
     @State private var menuExpanded = false
     @Namespace private var menuGlass
+    /// 底部胶囊上方那张卡片当前的高度；换卡片时由它带着卡片平滑地变高变矮
+    @State private var cardHeight: CGFloat?
+    /// 屏幕上正在显示的菜单样式；跟着设置走，但切换时一定带动画
+    @State private var shownMenuStyle: ReaderMenuStyle?
     @State private var autoMode: AutoMode?
     @State private var boundaryHandled = false
     @State private var forwardTurns = 0
@@ -169,6 +173,7 @@ struct ReaderView: View {
                                 onPageRange: { pageRange = $0 },
                                 onChapterLength: recordChapterLength,
                                 showsFooterTitle: autoMode == nil,
+                                menuShown: showingChrome,
                                 forwardTurns: forwardTurns,
                                 onReachEnd: reachEnd,
                                 onInteractionChanged: { owner, active in
@@ -181,6 +186,12 @@ struct ReaderView: View {
                             )
                         }
                     }
+                    // 翻页和滚动互换时：旧的正文先淡到纸色，新的再从纸色里浮出来。
+                    // 两种排法的行位置不完全一样，同时叠着淡入淡出会出现重影，所以前后错开、不重叠。
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.14)),
+                        removal: .opacity.animation(.easeIn(duration: 0.12))
+                    ))
                     .ignoresSafeArea()
                 }
                 .transition(.opacity)
@@ -192,7 +203,7 @@ struct ReaderView: View {
                     ScrollEdges(background: Color(style.background))
                 }
                 if usesScroll, autoMode == nil {
-                    ScrollFooter(chapterTitle: content.chapters[min(position.chapter, content.chapters.count - 1)].title,
+                    ScrollFooter(chapterTitle: ChapterTitle.parts(content.chapters[min(position.chapter, content.chapters.count - 1)].title).name,
                                  progress: progressText(content), color: Color(style.secondary))
                 }
             } else if failed {
@@ -223,7 +234,7 @@ struct ReaderView: View {
                 chrome(content: content)
             }
             if !showingChrome, let autoMode, let content {
-                miniAutoControl(autoMode, chapterTitle: content.chapters[min(position.chapter, content.chapters.count - 1)].title)
+                miniAutoControl(autoMode, chapterTitle: ChapterTitle.parts(content.chapters[min(position.chapter, content.chapters.count - 1)].title).name)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -253,12 +264,19 @@ struct ReaderView: View {
             if !Task.isCancelled { forwardTurns += 1 }
         }
         .sensoryFeedback(.impact(weight: .light), trigger: bookmarks.count)
-        .onChange(of: menuStyle) {
-            // 换了菜单样式，上一种样式里打开的卡片一并收起。
-            panel = nil
-            menuExpanded = false
-        }
         .modifier(ReaderWakeLock(enabled: autoMode != nil))
+        // 换配色、换翻页方式（含开始/停止自动滚动）：整屏淡入淡出，不生硬地一下子跳过去。
+        .onChange(of: theme) { crossfadeWindow() }
+        // 翻页方式、菜单样式存在 AppStorage 里，改动时不一定带着动画；这里统一补上。
+        .animation(.easeInOut(duration: 0.25), value: usesScroll)
+        .onChange(of: menuStyle) { _, style in
+            withAnimation(.spring(duration: 0.4, bounce: 0.1)) {
+                shownMenuStyle = style
+                // 换了菜单样式，上一种样式里打开的卡片一并收起。
+                panel = nil
+                menuExpanded = false
+            }
+        }
         .onChange(of: position) { _, new in
             book.readingChapter = new.chapter
             book.readingOffset = new.offset
@@ -315,9 +333,18 @@ struct ReaderView: View {
 
             if showingChrome {
                 VStack(spacing: 12) {
-                    switch menuStyle {
-                    case .capsule: capsuleMenu(content: content, current: current, paper: paper)
-                    case .folding: foldingMenu(content: content, current: current, paper: paper)
+                    // 换菜单样式：底部胶囊往下沉着收起，右下角的 ⋯ 从角落里长出来；反过来亦然。
+                    switch shownMenuStyle ?? menuStyle {
+                    case .capsule:
+                        VStack(spacing: 12) {
+                            capsuleMenu(content: content, current: current, paper: paper)
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .bottom)).combined(with: .offset(y: 20)))
+                    case .folding:
+                        VStack(spacing: 12) {
+                            foldingMenu(content: content, current: current, paper: paper)
+                        }
+                        .transition(.opacity.combined(with: .scale(scale: 0.5, anchor: .bottomTrailing)))
                     }
                 }
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -329,8 +356,13 @@ struct ReaderView: View {
         .padding(.bottom, 26)
         .tint(Color(style.text))
         .foregroundStyle(Color(style.text))
-        // Empty space stays touch-transparent, including while a card is open.
-        // A vertical swipe can therefore reach ScrollReader and dismiss the menu.
+        .background {
+            // 菜单背后用纸色轻轻晕开，菜单不与正文相叠。不拦触摸：空白处仍可上下滑动正文、收起菜单。
+            if showingChrome {
+                MenuEdges(background: paper)
+                    .transition(.opacity)
+            }
+        }
     }
 
     /// 读到全书的几成（0…1，按章和章内位置估算）。
@@ -364,10 +396,14 @@ struct ReaderView: View {
                     showingChrome = false
                 }
             },
-            onStep: { position = ReadingPosition(chapter: $0, offset: 0) },
+            onStep: { chapter in
+                withAnimation(.smooth(duration: 0.35)) { position = ReadingPosition(chapter: chapter, offset: 0) }
+            },
             onDelete: { bookmark in
-                modelContext.delete(bookmark)
-                try? modelContext.save()
+                withAnimation(.spring(duration: 0.35)) {
+                    modelContext.delete(bookmark)
+                    try? modelContext.save()
+                }
             }
         )
         .frame(maxWidth: 460)
@@ -376,23 +412,40 @@ struct ReaderView: View {
     /// 底部胶囊：点图标在它上方弹出卡片。
     @ViewBuilder
     private func capsuleMenu(content: BookContent, current: Int, paper: Color) -> some View {
-        Group {
-            switch panel {
-            case .contents:
-                contentsPanel(content: content, current: current, paper: paper)
-            case .display:
-                DisplayCard(fontSize: $fontSize, lineHeight: $lineHeight, theme: $theme, menuStyle: $menuStyle, pageMode: $pageMode, paper: paper)
-            case .auto:
-                AutoCard(autoMode: autoMode, paper: paper, onStart: startAuto, onStop: stopAuto) {
-                    if let autoMode { speedDial(autoMode) }
-                }
-            case nil:
-                EmptyView()
+        // 卡片本身只在打开、收起时出现和消失；在目录、显示、自动阅读之间切换时卡片一直在，
+        // 只是高度平滑地变到新内容的高度，旧内容先淡出、新内容随后淡入，都裁在卡片里。
+        if let panel {
+            ZStack(alignment: .top) {
+                panelContent(panel, content: content, current: current, paper: paper)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .id(panel)
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.08)),
+                        removal: .opacity.animation(.easeOut(duration: 0.1))
+                    ))
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                        // 正在淡出的旧内容不再左右卡片高度。
+                        guard self.panel == panel else { return }
+                        if let old = cardHeight, abs(old - height) > 0.5 {
+                            withAnimation(.spring(duration: 0.38, bounce: 0.06)) { cardHeight = height }
+                        } else if cardHeight == nil {
+                            cardHeight = height
+                        }
+                    }
             }
+            .frame(maxWidth: 440)
+            .frame(height: cardHeight, alignment: .top)
+            .clipShape(.rect(cornerRadius: 26))
+            .paperGlass(paper, in: .rect(cornerRadius: 26))
+            .environment(\.readerCardChromeless, true)
+            .padding(.horizontal, 16)
+            // 卡片从底部胶囊那里长出来，收起时缩回去。透明只在最开头一闪而过，
+            // 免得玻璃半透明的那一段时间里，下面的正文透上来和卡片里的字叠在一起。
+            .transition(.scale(scale: 0.86, anchor: .bottom)
+                .combined(with: .offset(y: 10))
+                .combined(with: .opacity.animation(.easeOut(duration: 0.1))))
+            .onDisappear { cardHeight = nil }
         }
-        .padding(.horizontal, 16)
-        // 卡片从底部胶囊那里长出来，收起时缩回去。
-        .transition(.scale(scale: 0.92, anchor: .bottom).combined(with: .opacity).combined(with: .offset(y: 12)))
 
         ReaderToolbar(
             panel: $panel,
@@ -403,6 +456,20 @@ struct ReaderView: View {
                 withAnimation(.spring(duration: 0.3)) { toggleBookmark(content: content) }
             }
         )
+    }
+
+    @ViewBuilder
+    private func panelContent(_ panel: ReaderPanel, content: BookContent, current: Int, paper: Color) -> some View {
+        switch panel {
+        case .contents:
+            contentsPanel(content: content, current: current, paper: paper)
+        case .display:
+            DisplayCard(fontSize: $fontSize, lineHeight: $lineHeight, theme: $theme, menuStyle: $menuStyle, pageMode: $pageMode, paper: paper)
+        case .auto:
+            AutoCard(autoMode: autoMode, paper: paper, onStart: startAuto, onStop: stopAuto) {
+                if let autoMode { speedDial(autoMode) }
+            }
+        }
     }
 
     /// 折叠菜单：右下角 ⋯，点开向上长出一串胶囊；自动阅读进行中时左下角有调速和停止。
@@ -428,7 +495,9 @@ struct ReaderView: View {
                             paper: paper,
                             chapterCount: content.chapters.count,
                             currentChapter: current,
-                            onJumpToChapter: { position = ReadingPosition(chapter: $0, offset: 0) },
+                            onJumpToChapter: { chapter in
+                                withAnimation(.smooth(duration: 0.35)) { position = ReadingPosition(chapter: chapter, offset: 0) }
+                            },
                             isBookmarked: bookmarkHere != nil,
                             onToggleBookmark: {
                                 withAnimation(.spring(duration: 0.3)) { toggleBookmark(content: content) }
@@ -647,6 +716,12 @@ struct ReaderView: View {
         }
     }
 
+    private func crossfadeWindow() {
+        guard !UIAccessibility.isReduceMotionEnabled,
+              let window = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.keyWindow else { return }
+        UIView.transition(with: window, duration: 0.32, options: [.transitionCrossDissolve, .allowUserInteraction], animations: nil)
+    }
+
     private func toggleChrome() {
         withAnimation(.spring(duration: 0.35, bounce: 0.12)) {
             showingSpeedDial = false
@@ -718,6 +793,8 @@ private struct ContentsPanel: View {
 
     private enum Tab { case contents, bookmarks }
     @State private var tab = Tab.contents
+    /// 当前章那层藕粉底色：换章时从旧的一行滑到新的一行
+    @Namespace private var currentRow
 
     private static let rowHeight: CGFloat = 38
 
@@ -739,7 +816,9 @@ private struct ContentsPanel: View {
         }
         // 内容少时贴合，多时最高约半屏，其余滚动查看。
         .frame(height: panelHeight)
-        .paperGlass(paper, in: .rect(cornerRadius: 26))
+        // 切换目录、书签时，列表淡入淡出也只在卡片里，不伸出去。
+        .clipShape(.rect(cornerRadius: 26))
+        .cardGlass(paper, in: .rect(cornerRadius: 26))
     }
 
     private var panelHeight: CGFloat {
@@ -761,6 +840,7 @@ private struct ContentsPanel: View {
                         .font(.serif(12))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
+                        .contentTransition(.numericText(value: Double(current)))
                         .fixedSize()
                     step("chevron.right", to: current + 1)
                 }
@@ -773,6 +853,7 @@ private struct ContentsPanel: View {
                 }
             }
             .frame(height: 2)
+            .animation(.smooth(duration: 0.4), value: current)
         }
     }
 
@@ -795,8 +876,8 @@ private struct ContentsPanel: View {
             withAnimation(.easeOut(duration: 0.2)) { tab = target }
         } label: {
             Text(title)
-                .font(.serif(tab == target ? 17 : 14, medium: tab == target))
-                .tracking(tab == target ? 2 : 0)
+                // 选中的一项字号、字距平滑地放大，不是一下子跳过去。
+                .modifier(TabTitleStyle(size: tab == target ? 17 : 14, tracking: tab == target ? 2 : 0, medium: tab == target))
                 .foregroundStyle(tab == target ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
         }
         .buttonStyle(.plain)
@@ -805,8 +886,19 @@ private struct ContentsPanel: View {
     private var chapterList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 0) {
+                LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(chapters) { chapter in
+                        // 卷名变了就插一行小标题，各章只写章名。
+                        let volume = ChapterTitle.parts(chapter.title).volume
+                        if let volume, chapter.id == 0 || ChapterTitle.parts(chapters[chapter.id - 1].title).volume != volume {
+                            Text(volume)
+                                .font(.serif(12, medium: true))
+                                .foregroundStyle(.tint)
+                                .lineLimit(1)
+                                .padding(.horizontal, 12)
+                                .padding(.top, chapter.id == 0 ? 4 : 14)
+                                .padding(.bottom, 4)
+                        }
                         row(chapter)
                             .id(chapter.id)
                     }
@@ -842,6 +934,7 @@ private struct ContentsPanel: View {
                 LazyVStack(spacing: 2) {
                     ForEach(bookmarks) { bookmark in
                         bookmarkRow(bookmark)
+                            .transition(.asymmetric(insertion: .opacity, removal: .opacity.combined(with: .move(edge: .leading))))
                     }
                 }
                 .padding(.horizontal, 8)
@@ -886,7 +979,7 @@ private struct ContentsPanel: View {
 
     private func row(_ chapter: Chapter) -> some View {
         let isCurrent = chapter.id == current
-        let (number, name) = Self.split(chapter.title, index: chapter.id)
+        let (number, name) = Self.split(ChapterTitle.parts(chapter.title).name, index: chapter.id)
         return Button { onSelect(chapter.id, 0) } label: {
             HStack(spacing: 8) {
                 Text(number)
@@ -906,10 +999,9 @@ private struct ContentsPanel: View {
             .background {
                 if isCurrent {
                     Capsule().fill(Color.accent.opacity(0.16))
-                        .transition(.opacity)
+                        .matchedGeometryEffect(id: "current", in: currentRow)
                 }
             }
-            .animation(.easeOut(duration: 0.25), value: isCurrent)
             .contentShape(.capsule)
         }
         .buttonStyle(.plain)
@@ -926,7 +1018,26 @@ private struct ContentsPanel: View {
     }
 }
 
-/// 滚动正文在顶部避开系统状态区，底部保持透明。
+/// 字号、字距可以随动画逐帧变化的标签字体。
+private struct TabTitleStyle: ViewModifier, Animatable {
+    var size: CGFloat
+    var tracking: CGFloat
+    var medium: Bool
+
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(size, tracking) }
+        set { size = newValue.first; tracking = newValue.second }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .font(.serif(size, medium: medium))
+            .tracking(tracking)
+    }
+}
+
+/// 滚动正文上下两端的渐隐，像字幕从纸面里浮出、又隐没。
+/// 顶部先实底遮住灵动岛一带再渐隐；底部同理，页脚（章名、进度、自动阅读胶囊）落在实底上，不与正文相叠。
 private struct ScrollEdges: View {
     let background: Color
 
@@ -936,6 +1047,9 @@ private struct ScrollEdges: View {
             LinearGradient(colors: [background, background.opacity(0)], startPoint: .top, endPoint: .bottom)
                 .frame(height: 56)
             Spacer()
+            LinearGradient(colors: [background.opacity(0), background], startPoint: .top, endPoint: .bottom)
+                .frame(height: 56)
+            background.frame(height: 76)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -1012,6 +1126,23 @@ private struct ScrollFooter: View {
         .frame(maxHeight: .infinity, alignment: .bottom)
         .padding(.horizontal, 31)
         .padding(.bottom, 33)
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+    }
+}
+
+/// 菜单出现时，底部菜单背后的纸色渐隐；最底下页脚那一条留空，章名和页码照常可见。
+private struct MenuEdges: View {
+    let background: Color
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            LinearGradient(stops: [.init(color: background.opacity(0), location: 0), .init(color: background, location: 0.4),
+                                   .init(color: background, location: 0.6), .init(color: background.opacity(0), location: 0.64)],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(height: 170)
+        }
         .ignoresSafeArea()
         .allowsHitTesting(false)
     }
