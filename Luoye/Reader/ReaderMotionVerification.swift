@@ -63,6 +63,43 @@ import UIKit
         check(strip.currentPage?.ref.chapter == 8 && strip.x == 0, "the end-of-book nudge springs back to the last page")
         strip.deactivate()
 
+        // iPad 横屏：摊开两页，翻一下前进两页；右页绕书脊翻到左边。
+        let longChapters = (0..<3).map { Chapter(id: $0, title: "第\($0)章", paragraphs: Array(repeating: "摊开的书页，一页接着一页，翻过去的是右页，落下来的是下一屏的左页。", count: 60)) }
+        let spreadPosition = Position()
+        let spreadParent = PagedReader(content: BookContent(chapters: longChapters, image: { _ in nil }), style: style, size: CGSize(width: 1210, height: 834),
+                                       insets: UIEdgeInsets(top: 60, left: 82, bottom: 70, right: 82),
+                                       position: Binding(get: { spreadPosition.value }, set: { spreadPosition.value = $0 }), onTapCenter: {},
+                                       columns: 2, columnGap: 96)
+        let book = PageStripView(frame: CGRect(x: 0, y: 0, width: 1210, height: 834))
+        book.update(spreadParent)
+        try? await Task.sleep(for: .milliseconds(30))
+        let firstLayout = book.layout(for: 0)
+        book.step(1)
+        for _ in 0 ..< 240 where book.isMoving { book.advance(by: 1.0 / 60) }
+        try? await Task.sleep(for: .milliseconds(30))
+        check(firstLayout.pageCount > 4 && spreadPosition.value == ReadingPosition(chapter: 0, offset: firstLayout.characterRange(ofPage: 2).location),
+              "one turn on a two-page spread advances exactly two pages")
+        spreadPosition.value = ReadingPosition(chapter: 0, offset: firstLayout.characterRange(ofPage: 5).location + 3); book.update(book.parent!)
+        try? await Task.sleep(for: .milliseconds(30))
+        check(book.anchor == .init(chapter: 0, page: 2), "a position on a right-hand page opens the spread that contains it")
+        if let window = UIApplication.shared.connectedScenes.compactMap({ ($0 as? UIWindowScene)?.keyWindow }).first {
+            window.addSubview(book)
+            book.step(1); book.advance(by: 0.09)
+            book.setNeedsLayout(); book.layoutIfNeeded()
+            try? await Task.sleep(for: .milliseconds(100))
+            let image = UIGraphicsImageRenderer(bounds: book.bounds).image { _ in book.drawHierarchy(in: book.bounds, afterScreenUpdates: true) }
+            try? image.pngData()?.write(to: FileManager.default.temporaryDirectory.appending(path: "LuoyeSpreadFlip.png"))
+            book.removeFromSuperview()
+        }
+        book.deactivate()
+
+        // 划得太短、没被认成拖动的一下：按划的方向翻页，不能按落点当成点击往回翻。
+        let left = CGPoint(x: 60, y: 400)
+        check(PageStripView.tapIntent(down: left, up: CGPoint(x: 62, y: 403), width: 390) == .tap, "a still finger on the left edge is a tap")
+        check(PageStripView.tapIntent(down: left, up: CGPoint(x: 52, y: 401), width: 390) == .flick(1), "a short leftward flick on the left edge turns forward, not back")
+        check(PageStripView.tapIntent(down: left, up: CGPoint(x: 70, y: 402), width: 390) == .flick(-1), "a short rightward flick turns back")
+        check(PageStripView.tapIntent(down: left, up: CGPoint(x: 63, y: 430), width: 390) == .ignore, "a short downward swipe never turns a page")
+
         let scrollPosition = Position(); scrollPosition.value = ReadingPosition(chapter: 5, offset: 0)
         let scrollParent = ScrollReader(content: content, style: style, size: CGSize(width: 390, height: 800), insets: parent.insets, position: Binding(get: { scrollPosition.value }, set: { scrollPosition.value = $0 }), speed: 0, onTap: {}, onReachEnd: {})
         let scrollCoordinator = scrollParent.makeCoordinator(), scroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 390, height: 800))

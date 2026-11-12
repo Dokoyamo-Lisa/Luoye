@@ -239,7 +239,7 @@ private struct MangaSettingsPage: View {
                         }
                     }
                     Text("落叶 · 把故事留在手边").font(.serif(12)).foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.top, 8)
-                }.luoyeContentMargins(maximumWidth: 820)
+                }.luoyeContentMargins()
             }.luoyeRootSurface()
         }
     }

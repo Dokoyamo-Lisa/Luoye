@@ -25,8 +25,10 @@ struct TomatoShelfContent: View {
             if store.favorites.isEmpty {
                 LuoyeEmptyState(icon: "bookmark", title: "收藏一部想读的小说", message: "在番茄书籍详情中点亮收藏，就能在这里找到它。")
             }
-            ForEach(store.favorites) { book in
-                NavigationLink(value: book) { LuoyePanel { TomatoBookRow(book: book) } }.buttonStyle(.plain)
+            LuoyeRowGrid {
+                ForEach(store.favorites) { book in
+                    NavigationLink(value: book) { LuoyePanel { TomatoBookRow(book: book) } }.buttonStyle(.plain)
+                }
             }
         }
     }
@@ -63,9 +65,11 @@ struct TomatoDiscoverContent: View {
             }.font(.serif(13)).buttonStyle(.plain)
             if searching { ProgressView("正在搜索…").font(.serif(13)) }
             if let failure { Text(failure).font(.serif(13)).foregroundStyle(.secondary) }
-            ForEach(results) { book in
-                NavigationLink(value: book) { LuoyePanel { TomatoBookRow(book: book) } }.buttonStyle(.plain)
-            }
+            if !results.isEmpty { LuoyeRowGrid {
+                ForEach(results) { book in
+                    NavigationLink(value: book) { LuoyePanel { TomatoBookRow(book: book) } }.buttonStyle(.plain)
+                }
+            } }
             if results.isEmpty && !searching {
                 LuoyeSegmentBar(items: TomatoHomeSection.allCases.map { .init(value: $0, title: $0.title) }, selection: $homeSection)
                 HStack {
@@ -75,8 +79,10 @@ struct TomatoDiscoverContent: View {
                     else { Button { store.homeRefresh += 1 } label: { Image(systemName: "arrow.clockwise") }.accessibilityLabel("刷新官网推荐") }
                 }
                 if let homeFailure { Text(homeFailure).font(.serif(12)).foregroundStyle(.secondary) }
-                ForEach(recommendations) { book in
-                    NavigationLink(value: book) { LuoyePanel { TomatoBookRow(book: book) } }.buttonStyle(.plain)
+                LuoyeRowGrid {
+                    ForEach(recommendations) { book in
+                        NavigationLink(value: book) { LuoyePanel { TomatoBookRow(book: book) } }.buttonStyle(.plain)
+                    }
                 }
                 LuoyeSettingsSection(title: "从一本小说开始", footnote: "无需配置服务即可查看官网推荐、书目和目录，并提纯当前可访问的网页正文。书名搜索和整书下载可连接兼容的下载器服务。") {
                     Text("粘贴番茄小说书号或完整书籍链接，查看简介、目录并收藏。").font(.serif(14)).lineSpacing(4)

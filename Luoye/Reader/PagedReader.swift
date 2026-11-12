@@ -32,6 +32,10 @@ struct PagedReader: UIViewRepresentable {
     var onReachEnd: () -> Void = {}
     /// 手指拖动页面的开始与结束（自动翻页在拖动时暂停，松手后重新计时）
     var onInteractionChanged: (UUID, Bool) -> Void = { _, _ in }
+    /// 一屏几栏：iPad 横屏是 2，像摊开的书一样左右两页，翻页时右页绕书脊翻到左边。
+    var columns = 1
+    /// 两栏时左右两页正文之间的距离（书脊两侧的留白）
+    var columnGap: CGFloat = 0
 
     func makeUIView(context: Context) -> PageStripView {
         let view = PageStripView()
@@ -65,6 +69,7 @@ final class PageStripView: UIView {
     private var laidOutInsets: UIEdgeInsets?
     private var laidOutFooterTitle = true
     private var laidOutChapterCount = 0
+    private var laidOutColumns = 1
 
     // 页带
     private(set) var anchor: PageRef?
@@ -76,6 +81,14 @@ final class PageStripView: UIView {
     private(set) var target: CGFloat = 0
     private var neighbors: [Int: PageRef?] = [:]
     private var pageViews: [Int: PageView] = [:]
+    /// 两栏时，页带上第 i 屏的左右两页（不整屏平移，而是右页绕书脊翻过去）
+    private var spreads: [Int: Spread] = [:]
+    private struct Spread {
+        let ref: PageRef
+        let left: HalfPageView
+        let right: HalfPageView
+        var views: [HalfPageView] { [left, right] }
+    }
     private var displayLink: CADisplayLink?
     /// 眼前这一页（页带停稳时）
     var currentPage: PageView? { pageViews[0] }
@@ -86,6 +99,8 @@ final class PageStripView: UIView {
     // 手势
     private let pan = UIPanGestureRecognizer()
     private let tap = UITapGestureRecognizer()
+    /// 这次触摸按下的位置。点击在抬手时才触发，用它分辨「真的点了一下」和「划得太短、没被认成拖动的一下」。
+    private var touchDown: CGPoint?
     private var dragStart: CGFloat = 0
     private(set) var isDragging = false
     /// 一次拖动从按下到页带停稳算一次交互；外面据此暂停自动翻页
@@ -112,6 +127,7 @@ final class PageStripView: UIView {
         tap.addTarget(self, action: #selector(handleTap(_:)))
         // 手指一动就是拖动，没动才算点击；点击不必等待，抬手即触发。
         tap.require(toFail: pan)
+        tap.delegate = self
         addGestureRecognizer(pan)
         addGestureRecognizer(tap)
     }
@@ -131,13 +147,14 @@ final class PageStripView: UIView {
               new.size.height > new.insets.top + new.insets.bottom else { return }
 
         if new.style != laidOutStyle || new.size != laidOutSize || new.insets != laidOutInsets
-            || new.content.chapters.count != laidOutChapterCount {
+            || new.content.chapters.count != laidOutChapterCount || max(new.columns, 1) != laidOutColumns {
             let firstLayout = laidOutStyle == nil
             layouts = [:]
             laidOutStyle = new.style
             laidOutSize = new.size
             laidOutInsets = new.insets
             laidOutChapterCount = new.content.chapters.count
+            laidOutColumns = max(new.columns, 1)
             laidOutFooterTitle = new.showsFooterTitle
             // 换字号、转屏：停在含原位置的那一页，阅读位置本身不动，免得反复排版后往前漂。
             let keep = (shown == nil || new.position != shown) ? new.position : shown!
@@ -150,6 +167,7 @@ final class PageStripView: UIView {
         if new.showsFooterTitle != laidOutFooterTitle {
             laidOutFooterTitle = new.showsFooterTitle
             for (_, view) in pageViews { view.setFooterTitle(footerTitle(for: view.ref.chapter)) }
+            for (_, spread) in spreads { spread.left.setFooterTitle(footerTitle(for: spread.ref.chapter)) }
         }
 
         if new.forwardTurns != handledTurns {
@@ -176,8 +194,24 @@ final class PageStripView: UIView {
 
     private var pageSize: CGSize {
         guard let parent else { return .zero }
-        return CGSize(width: parent.size.width - parent.insets.left - parent.insets.right,
+        let gaps = parent.columnGap * CGFloat(laidOutColumns - 1)
+        return CGSize(width: (parent.size.width - parent.insets.left - parent.insets.right - gaps) / CGFloat(laidOutColumns),
                       height: parent.size.height - parent.insets.top - parent.insets.bottom)
+    }
+
+    // 页带上的「一屏」：单栏时就是一页；两栏时是摊开的左右两页，每章从左页起。
+    private func screenCount(_ layout: ChapterLayout) -> Int {
+        (layout.pageCount + laidOutColumns - 1) / laidOutColumns
+    }
+
+    private func screen(containing offset: Int, in layout: ChapterLayout) -> Int {
+        layout.page(containing: offset) / laidOutColumns
+    }
+
+    private func characterRange(ofScreen screen: Int, in layout: ChapterLayout) -> NSRange {
+        let first = screen * laidOutColumns
+        let last = min(first + laidOutColumns - 1, layout.pageCount - 1)
+        return NSUnionRange(layout.characterRange(ofPage: first), layout.characterRange(ofPage: last))
     }
 
     func layout(for chapter: Int) -> ChapterLayout {
@@ -194,9 +228,9 @@ final class PageStripView: UIView {
         if step < 0 {
             if ref.page > 0 { return PageRef(chapter: ref.chapter, page: ref.page - 1) }
             guard ref.chapter > 0 else { return nil }
-            return PageRef(chapter: ref.chapter - 1, page: layout(for: ref.chapter - 1).pageCount - 1)
+            return PageRef(chapter: ref.chapter - 1, page: screenCount(layout(for: ref.chapter - 1)) - 1)
         } else {
-            if ref.page + 1 < layout(for: ref.chapter).pageCount { return PageRef(chapter: ref.chapter, page: ref.page + 1) }
+            if ref.page + 1 < screenCount(layout(for: ref.chapter)) { return PageRef(chapter: ref.chapter, page: ref.page + 1) }
             guard ref.chapter + 1 < count else { return nil }
             return PageRef(chapter: ref.chapter + 1, page: 0)
         }
@@ -229,6 +263,7 @@ final class PageStripView: UIView {
 
     private func layoutPages() {
         guard let parent, anchor != nil, bounds.width > 0 else { return }
+        if laidOutColumns > 1 { layoutSpreads(); return }
         // 屏幕上露出的页，再各多备一页：快翻时下一页早已画好。
         let low = Int(floor(x)) - 1, high = Int(ceil(x)) + 1
         var wanted: [Int: PageRef] = [:]
@@ -258,6 +293,73 @@ final class PageStripView: UIView {
         if let snapshot = jumpSnapshot { bringSubviewToFront(snapshot) }
     }
 
+    /// 两栏：x 在 i 与 i+1 之间时，第 i 屏的右页正绕书脊翻起，翻过一半后露出的是第 i+1 屏的左页（纸的背面）。
+    /// 底下垫着第 i 屏的左页和第 i+1 屏的右页。整个画面只由 x 决定，拖动、弹簧、连点都不用另写。
+    private func layoutSpreads() {
+        guard let parent else { return }
+        let base = Int(floor(x))
+        var fraction = x - CGFloat(base)
+        // 书头书尾往外拖：没有下一屏（或上一屏），纸只掀起一点点又落回去。
+        if ref(at: base + 1) == nil { fraction = min(fraction, 0.12) }
+        if ref(at: base) == nil { fraction = max(fraction, 0.88) }
+
+        var wanted: [Int: PageRef] = [:]
+        for index in base - 1 ... base + 2 { if let ref = ref(at: index) { wanted[index] = ref } }
+        for (index, spread) in spreads where wanted[index] != spread.ref {
+            spread.views.forEach { $0.removeFromSuperview() }
+            spreads[index] = nil
+        }
+        let half = CGSize(width: bounds.width / 2, height: bounds.height)
+        for (index, ref) in wanted where spreads[index] == nil {
+            let layout = layout(for: ref.chapter)
+            let first = ref.page * laidOutColumns
+            let make = { (page: Int, side: HalfPageView.Side) in
+                HalfPageView(side: side, layout: layout, page: page < layout.pageCount ? page : nil,
+                             title: side == .left ? self.footerTitle(for: ref.chapter) : nil,
+                             style: parent.style, insets: parent.insets, gap: parent.columnGap)
+            }
+            let spread = Spread(ref: ref, left: make(first, .left), right: make(first + 1, .right))
+            spread.views.forEach { addSubview($0) }
+            spreads[index] = spread
+        }
+
+        let angle = fraction * .pi
+        var perspective = CATransform3DIdentity
+        perspective.m34 = -1 / 2200
+        for (index, spread) in spreads {
+            for view in spread.views {
+                view.layer.anchorPoint = CGPoint(x: view.side == .left ? 1 : 0, y: 0.5)
+                view.bounds = CGRect(origin: .zero, size: half)
+                view.center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
+                view.layer.transform = CATransform3DIdentity
+                view.shade = 0
+                view.isHidden = true
+                view.layer.zPosition = 0
+            }
+            if index == base {
+                // 当前这一屏：左页垫底不动；右页是正在翻起的那张纸的正面，过了竖直就看不见了。
+                spread.left.isHidden = false
+                spread.right.isHidden = angle >= .pi / 2
+                spread.right.layer.transform = CATransform3DRotate(perspective, -angle, 0, 1, 0)
+                spread.right.shade = sin(angle) * 0.22
+                spread.right.layer.zPosition = 2
+            } else if index == base + 1, fraction > 0 {
+                // 下一屏：右页垫底慢慢露出来；左页是那张纸的背面，竖起来之后才翻落到左边。
+                spread.right.isHidden = false
+                spread.right.shade = (1 - fraction) * 0.12
+                spread.left.isHidden = angle < .pi / 2
+                spread.left.layer.transform = CATransform3DRotate(perspective, .pi - angle, 0, 1, 0)
+                spread.left.shade = sin(angle) * 0.18
+                spread.left.layer.zPosition = 3
+            }
+        }
+        // 底页在下，翻动的纸在上。
+        for view in subviews.compactMap({ $0 as? HalfPageView }).sorted(by: { $0.layer.zPosition < $1.layer.zPosition }) {
+            bringSubviewToFront(view)
+        }
+        if let snapshot = jumpSnapshot { bringSubviewToFront(snapshot) }
+    }
+
     /// 页带挪过半页以上，就把锚点换到最近的那一页，坐标回到 0 附近。
     private func recenter() {
         let shift = Int(x.rounded())
@@ -267,6 +369,9 @@ final class PageStripView: UIView {
         var moved: [Int: PageView] = [:]
         for (index, view) in pageViews { moved[index - shift] = view }
         pageViews = moved
+        var movedSpreads: [Int: Spread] = [:]
+        for (index, spread) in spreads { movedSpreads[index - shift] = spread }
+        spreads = movedSpreads
         var refs: [Int: PageRef?] = [:]
         for (index, ref) in neighbors where index != shift { refs[index - shift] = ref }
         // 旧锚点成了相对位置 -shift 的那一页
@@ -278,7 +383,7 @@ final class PageStripView: UIView {
     /// 只留锚点前后一章的排版，长书也不会越占越多内存。
     private func trimLayouts() {
         guard let anchor else { return }
-        let keep = Set(pageViews.values.map(\.ref.chapter)).union([anchor.chapter - 1, anchor.chapter, anchor.chapter + 1])
+        let keep = Set(pageViews.values.map(\.ref.chapter) + spreads.values.map(\.ref.chapter)).union([anchor.chapter - 1, anchor.chapter, anchor.chapter + 1])
         layouts = layouts.filter { keep.contains($0.key) }
     }
 
@@ -287,7 +392,7 @@ final class PageStripView: UIView {
     private func jump(to position: ReadingPosition, animated: Bool) {
         guard let parent else { return }
         let chapter = min(max(position.chapter, 0), parent.content.chapters.count - 1)
-        let page = layout(for: chapter).page(containing: position.offset)
+        let page = screen(containing: position.offset, in: layout(for: chapter))
 
         if isDragging { pan.isEnabled = false; pan.isEnabled = true; isDragging = false }
         stopSpring()
@@ -299,6 +404,8 @@ final class PageStripView: UIView {
 
         pageViews.values.forEach { $0.removeFromSuperview() }
         pageViews = [:]
+        spreads.values.forEach { $0.views.forEach { $0.removeFromSuperview() } }
+        spreads = [:]
         neighbors = [:]
         anchor = PageRef(chapter: chapter, page: page)
         x = 0; target = 0; velocity = 0
@@ -416,8 +523,8 @@ final class PageStripView: UIView {
         guard let anchor else { return }
         let layout = layout(for: anchor.chapter)
         // 还停在原位置所在的那一页（比如拖了一下又弹回），位置不动。
-        let stillThere = shown.map { $0.chapter == anchor.chapter && layout.page(containing: $0.offset) == anchor.page } ?? false
-        if !stillThere { shown = ReadingPosition(chapter: anchor.chapter, offset: layout.characterRange(ofPage: anchor.page).location) }
+        let stillThere = shown.map { $0.chapter == anchor.chapter && screen(containing: $0.offset, in: layout) == anchor.page } ?? false
+        if !stillThere { shown = ReadingPosition(chapter: anchor.chapter, offset: characterRange(ofScreen: anchor.page, in: layout).location) }
         report(fromUpdate: false)
         endInteraction(deferred: false)
         trimLayouts()
@@ -427,7 +534,7 @@ final class PageStripView: UIView {
     private func report(fromUpdate: Bool) {
         guard let parent, let anchor, let shown else { return }
         let layout = layout(for: anchor.chapter)
-        let range = layout.characterRange(ofPage: anchor.page)
+        let range = characterRange(ofScreen: anchor.page, in: layout)
         let pageRange = range.location ..< NSMaxRange(range)
         let length = layout.storage.length
         let send = { [weak self] in
@@ -478,8 +585,11 @@ final class PageStripView: UIView {
         case .ended, .cancelled, .failed:
             guard isDragging else { return }
             isDragging = false
+            // 斜着起手、其实是往下划的一下：横向那点位移不算翻页，弹回原页。
+            let moved = gesture.translation(in: self)
+            let vertical = abs(moved.y) > abs(moved.x) * 2
             let speed = -gesture.velocity(in: self).x / width
-            release(speed: gesture.state == .ended ? speed : 0)
+            release(speed: gesture.state == .ended && !vertical ? speed : 0)
         default:
             break
         }
@@ -522,10 +632,23 @@ final class PageStripView: UIView {
 
     @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
         guard let parent, isActive else { return }
-        if parent.menuShown { parent.onTapCenter(); return }
         let point = gesture.location(in: self)
+        let intent = Self.tapIntent(down: touchDown ?? point, up: point, width: width)
+        touchDown = nil
+        // 手指划了一小段：是没够上拖动门槛的轻划，不按落点算点击。
+        // 往左划翻下一页、往右划翻上一页，上下划什么都不做——不会因为落在左边就往回翻。
+        switch intent {
+        case .flick(let direction):
+            if !parent.menuShown { step(direction) }
+            return
+        case .ignore:
+            return
+        case .tap:
+            break
+        }
+        if parent.menuShown { parent.onTapCenter(); return }
         // 停稳时才看是不是点在注释标号上；翻页途中点一下就是翻页。
-        if displayLink == nil, let page = pageViews[0], let note = page.note(at: convert(point, to: page)) {
+        if displayLink == nil, let note = note(at: point) {
             parent.onNote(note)
             return
         }
@@ -533,6 +656,23 @@ final class PageStripView: UIView {
         if fraction < 0.3 { step(-1) }
         else if fraction > 0.7 { step(1) }
         else { parent.onTapCenter() }
+    }
+
+    private func note(at point: CGPoint) -> String? {
+        if let page = pageViews[0] { return page.note(at: convert(point, to: page)) }
+        guard let spread = spreads[0] else { return nil }
+        let half = point.x < bounds.width / 2 ? spread.left : spread.right
+        return half.note(at: convert(point, to: half))
+    }
+
+    enum TapIntent: Equatable { case tap, flick(Int), ignore }
+
+    /// 按下到抬起移动了多少：几乎没动是点击；横向为主是轻划翻页；竖向为主不处理。
+    static func tapIntent(down: CGPoint, up: CGPoint, width: CGFloat) -> TapIntent {
+        let dx = up.x - down.x, dy = up.y - down.y
+        guard hypot(dx, dy) > 8 else { return .tap }
+        guard abs(dx) > abs(dy) * 1.5 else { return .ignore }
+        return .flick(dx < 0 ? 1 : -1)
     }
 
     private func beginInteraction() {
@@ -556,6 +696,13 @@ final class PageStripView: UIView {
         case .right, .previous: return step(-1)
         default: return false
         }
+    }
+}
+
+extension PageStripView: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if gestureRecognizer === tap { touchDown = touch.location(in: self) }
+        return true
     }
 }
 
@@ -621,5 +768,94 @@ final class PageView: UIView {
         chapterLabel.frame = CGRect(x: insets.left, y: footerY, width: width * 0.7, height: 16)
         pageLabel.frame = CGRect(x: insets.left + width * 0.7, y: footerY, width: width * 0.3, height: 16)
         layer.shadowPath = UIBezierPath(rect: bounds).cgPath
+    }
+}
+
+/// 两栏时的半边：一页正文。左半边页脚写章名，右半边写页码；靠书脊那侧有一道浅浅的阴影。
+final class HalfPageView: UIView {
+    enum Side { case left, right }
+    let side: Side
+    private let layout: ChapterLayout
+    private let page: Int?
+    private let insets: UIEdgeInsets
+    private let gap: CGFloat
+    private let footer = UILabel()
+    private let textView: PageTextView?
+    private let spine = CAGradientLayer()
+    private let shadeView = UIView()
+    /// 翻动时盖在纸面上的一层暗影（0…1）
+    var shade: CGFloat {
+        get { shadeView.alpha }
+        set { shadeView.alpha = newValue }
+    }
+
+    init(side: Side, layout: ChapterLayout, page: Int?, title: String?, style: ReaderStyle, insets: UIEdgeInsets, gap: CGFloat) {
+        self.side = side
+        self.layout = layout
+        self.page = page
+        self.insets = insets
+        self.gap = gap
+        textView = page.map { PageTextView(layout: layout, page: $0) }
+        super.init(frame: .zero)
+        backgroundColor = style.background
+        layer.isDoubleSided = false
+        footer.font = UIFont(name: "NotoSerifSC-Regular", size: 11) ?? .systemFont(ofSize: 11)
+        footer.textColor = style.secondary
+        if side == .left {
+            footer.text = title
+            footer.lineBreakMode = .byTruncatingTail
+        } else if let page {
+            footer.text = "\(page + 1) / \(layout.pageCount)"
+            footer.textAlignment = .right
+        } else if layout.pageCount > 0 {
+            // 本章最后一屏只有左页：右边留白，页码仍写在右下角。
+            footer.text = "\(layout.pageCount) / \(layout.pageCount)"
+            footer.textAlignment = .right
+        }
+        if let textView { addSubview(textView) }
+        addSubview(footer)
+        let dark = UIColor.black.withAlphaComponent(style.background.isDark ? 0.22 : 0.07).cgColor
+        let clear = UIColor.black.withAlphaComponent(0).cgColor
+        spine.colors = side == .left ? [clear, dark] : [dark, clear]
+        spine.startPoint = CGPoint(x: 0, y: 0.5)
+        spine.endPoint = CGPoint(x: 1, y: 0.5)
+        layer.addSublayer(spine)
+        shadeView.backgroundColor = .black
+        shadeView.alpha = 0
+        shadeView.isUserInteractionEnabled = false
+        addSubview(shadeView)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    func setFooterTitle(_ title: String) {
+        if side == .left { footer.text = title }
+    }
+
+    func note(at point: CGPoint) -> String? {
+        guard let textView else { return nil }
+        return textView.note(at: convert(point, to: textView))
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // 整屏宽 W：左页正文从左边距起，右页正文从书脊右侧 gap/2 起，两栏一样宽。
+        let column = bounds.width - insets.left - gap / 2
+        let textX = side == .left ? insets.left : gap / 2
+        textView?.frame = CGRect(x: textX, y: insets.top, width: column, height: bounds.height - insets.top - insets.bottom)
+        let footerY = bounds.height - max(safeAreaInsets.bottom, 20) - 22
+        footer.frame = CGRect(x: textX, y: footerY, width: column, height: 16)
+        let spineWidth: CGFloat = 28
+        spine.frame = CGRect(x: side == .left ? bounds.width - spineWidth : 0, y: 0, width: spineWidth, height: bounds.height)
+        shadeView.frame = bounds
+    }
+}
+
+private extension UIColor {
+    var isDark: Bool {
+        var white: CGFloat = 0
+        getWhite(&white, alpha: nil)
+        return white < 0.5
     }
 }

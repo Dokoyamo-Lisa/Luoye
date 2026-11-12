@@ -54,6 +54,8 @@ struct ReaderView: View {
     @State private var renderedLengths: [Int: Int] = [:]
     /// 点注释标号后弹出的注释全文
     @State private var noteText: String?
+    /// 阅读页的安全区。iPhone 有灵动岛和较高的底部横条，iPad 隐藏状态栏后顶部几乎没有，菜单位置要按它算。
+    @State private var safeInsets = EdgeInsets()
     @Query private var bookmarks: [Bookmark]
 
     /// 从书籍详情的目录点进来时要直接打开的章节：章名，以及它在网页目录里的序号（按章名找不到时用）
@@ -129,7 +131,8 @@ struct ReaderView: View {
                     let safe = proxy.safeAreaInsets
                     let size = CGSize(width: proxy.size.width + safe.leading + safe.trailing,
                                       height: proxy.size.height + safe.top + safe.bottom)
-                    let insets = pageInsets(size: size, safe: safe)
+                    let spread = usesSpread(size: size)
+                    let insets = pageInsets(size: size, safe: safe, spread: spread)
                     Group {
                         if usesScroll {
                             ScrollReader(
@@ -182,7 +185,9 @@ struct ReaderView: View {
                                         pageInteractionID = nil
                                         pageInteractionRevision += 1
                                     }
-                                }
+                                },
+                                columns: spread ? 2 : 1,
+                                columnGap: spread ? Self.spreadGap : 0
                             )
                         }
                     }
@@ -251,6 +256,7 @@ struct ReaderView: View {
             }
         }
         // 菜单、目录也跟着正文配色走。总是给出明确的深浅色，不传 nil（传 nil 有时恢复不了）。
+        .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { safeInsets = $0 }
         .modifier(ReaderMotionScope())
         .preferredColorScheme(scheme)
         .eyeCareFilter()
@@ -289,12 +295,28 @@ struct ReaderView: View {
 
     /// 正文边距。宽度取整到「一行正好 N 个字」，高度取整到「一页正好 N 行」，
     /// 这样每行字距一致、行与行对齐。iPad 上另外限制一行的宽度。
-    private func pageInsets(size: CGSize, safe: EdgeInsets) -> UIEdgeInsets {
+    /// 书脊两侧正文之间的留白
+    private static let spreadGap: CGFloat = 96
+
+    /// iPad 横屏翻页：摊开成左右两页，像一本书。竖屏、手机、分屏变窄时仍是一页。
+    private func usesSpread(size: CGSize) -> Bool {
+        !usesScroll && sizeClass == .regular && size.width > size.height && size.width >= 960
+    }
+
+    private func pageInsets(size: CGSize, safe: EdgeInsets, spread: Bool = false) -> UIEdgeInsets {
         let regular = sizeClass == .regular
-        let maxLineWidth: CGFloat = 680
-        let minimumSide = max(regular ? 64 : 28, (size.width - maxLineWidth) / 2)
-        let columns = floor((size.width - minimumSide * 2) / style.fontSize)
-        let side = (size.width - columns * style.fontSize) / 2
+        let side: CGFloat
+        if spread {
+            // 每栏一行正好 N 个字，最多约 560 点宽；两栏加书脊留白后左右居中。
+            let available = (size.width - 64 * 2 - Self.spreadGap) / 2
+            let characters = floor(min(available, 560) / style.fontSize)
+            side = (size.width - characters * style.fontSize * 2 - Self.spreadGap) / 2
+        } else {
+            let maxLineWidth: CGFloat = 680
+            let minimumSide = max(regular ? 64 : 28, (size.width - maxLineWidth) / 2)
+            let columns = floor((size.width - minimumSide * 2) / style.fontSize)
+            side = (size.width - columns * style.fontSize) / 2
+        }
 
         let top = max(safe.top, 20) + (regular ? 40 : 24)
         let minimumBottom = max(safe.bottom, 16) + (regular ? 52 : 40)
@@ -350,10 +372,11 @@ struct ReaderView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        // 稍稍上移，返回按钮落在灵动岛下方、正文第一行之上。
-        .padding(.top, -14)
-        // 菜单停在页脚（章名、页码）上方，不压住它们。
-        .padding(.bottom, 26)
+        // 有灵动岛时稍稍上移，返回按钮落在灵动岛下方、正文第一行之上；
+        // iPad 这类顶部没有安全区的屏幕，离上边留出一点距离，不被切掉。
+        .padding(.top, safeInsets.top >= 40 ? -14 : max(14 - safeInsets.top, 0))
+        // 菜单停在页脚（章名、页码，离屏幕底边 33 点）上方，不压住它们；底部安全区较矮的 iPad 也一样。
+        .padding(.bottom, max(26, 60 - safeInsets.bottom))
         .tint(Color(style.text))
         .foregroundStyle(Color(style.text))
         .background {
@@ -664,7 +687,8 @@ struct ReaderView: View {
                 .paperGlass(Color(style.background), in: .rect(cornerRadius: 26))
                 .padding(.horizontal, 16)
                 // 菜单打开时浮在左下角控制上方，收起时浮在页脚的小胶囊上方。
-                .padding(.bottom, showingChrome ? 96 : 40)
+                // 底部安全区比 iPhone 矮（iPad）时一并抬高，和上移后的菜单、页脚保持同样的间距。
+                .padding(.bottom, (showingChrome ? 96 : 40) + max(0, 34 - safeInsets.bottom))
         }
     }
 

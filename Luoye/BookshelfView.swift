@@ -56,9 +56,7 @@ struct BookshelfView: View {
                                 shelf
                             }
                         }
-                        .padding(.horizontal, metrics.margin)
-                        .padding(.top, 8)
-                        .padding(.bottom, 40)
+                        .luoyeContentMargins(top: 8)
                     }
                 }
             }
@@ -199,9 +197,8 @@ struct BookshelfView: View {
                     }
                 }
             }
-            .padding(.horizontal, metrics.margin)
-            .padding(.top, 8)
-            .padding(.bottom, 40)
+            // 与发现页同样的边距和最大宽度：iPad 横屏切换标签时标题不跳。
+            .luoyeContentMargins(top: 8)
         }
         .refreshable {
             if onlineSource == .wenku8 {

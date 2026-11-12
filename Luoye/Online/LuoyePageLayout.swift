@@ -34,6 +34,20 @@ extension View {
     }
 }
 
+/// 一行一本书的列表：手机上一列；iPad 上两列并排，宽屏不再是一条条拉得很长的横条。
+struct LuoyeRowGrid<Content: View>: View {
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @ViewBuilder var content: Content
+    var body: some View {
+        if sizeClass == .regular {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16, alignment: .top), GridItem(.flexible(), spacing: 16, alignment: .top)],
+                      alignment: .leading, spacing: 16) { content }
+        } else {
+            VStack(alignment: .leading, spacing: 12) { content }
+        }
+    }
+}
+
 struct LuoyeModeHeading: View {
     @AppStorage("luoye.mode") private var mode = "haiku"
     @Environment(\.horizontalSizeClass) private var sizeClass

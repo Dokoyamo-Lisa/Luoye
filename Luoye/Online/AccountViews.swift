@@ -284,7 +284,7 @@ struct WenkuAccountView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 4)
                 }
-                .luoyeContentMargins(maximumWidth: 820)
+                .luoyeContentMargins()
             }
             .background(Color.paper)
             .scrollEdgeEffectHidden(true, for: .bottom)
@@ -906,7 +906,7 @@ struct BrowsingHistoryView: View {
                             .padding(.top, 4)
                     }
                 }
-                .luoyeContentMargins(maximumWidth: 820)
+                .luoyeContentMargins()
             }
             .background(Color.paper)
             .scrollEdgeEffectHidden(true, for: .bottom)
