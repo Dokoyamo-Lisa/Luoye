@@ -38,6 +38,8 @@ struct ReaderView: View {
     @Namespace private var menuGlass
     /// 底部胶囊上方那张卡片当前的高度；换卡片时由它带着卡片平滑地变高变矮
     @State private var cardHeight: CGFloat?
+    /// 卡片已经开着、只是换成另一张（目录 ↔ 显示 ↔ 自动阅读）；刚打开时里面的内容不用再等着淡入
+    @State private var cardSwitching = false
     /// 屏幕上正在显示的菜单样式；跟着设置走，但切换时一定带动画
     @State private var shownMenuStyle: ReaderMenuStyle?
     @State private var autoMode: AutoMode?
@@ -177,7 +179,8 @@ struct ReaderView: View {
                                 },
                                 onPageRange: { pageRange = $0 },
                                 onChapterLength: recordChapterLength,
-                                showsFooterTitle: autoMode == nil,
+                                // 自动阅读时左下角让给小胶囊；菜单打开、小胶囊收起时，章名回到页脚。
+                                showsFooterTitle: autoMode == nil || showingChrome,
                                 menuShown: showingChrome,
                                 forwardTurns: forwardTurns,
                                 onReachEnd: reachEnd,
@@ -207,11 +210,14 @@ struct ReaderView: View {
                     AutoPageLine(start: pageShownAt, interval: pageSeconds)
                 }
                 if usesScroll {
-                    ScrollEdges(background: Color(style.background), insets: readerInsets)
+                    ScrollEdges(background: Color(style.background), insets: readerInsets, safeTop: safeInsets.top)
                 }
-                if usesScroll, autoMode == nil {
+                if usesScroll {
+                    // 自动滚动且菜单收起时，左下角是自动阅读小胶囊（后面跟着章名），这里只留右边的进度和时间。
                     ScrollFooter(chapterTitle: ChapterTitle.parts(content.chapters[min(position.chapter, content.chapters.count - 1)].title).name,
-                                 progress: progressText(content), color: Color(style.secondary), side: readerInsets.left)
+                                 progress: progressText(content), color: Color(style.secondary), side: readerInsets.left,
+                                 showsTitle: autoMode == nil || showingChrome,
+                                 bottom: Self.footerCenter(safeBottom: safeInsets.bottom) - 7.5)
                 }
             } else if failed {
                 VStack(spacing: 10) {
@@ -241,7 +247,7 @@ struct ReaderView: View {
                 chrome(content: content)
             }
             if !showingChrome, let autoMode, let content {
-                miniAutoControl(autoMode, chapterTitle: ChapterTitle.parts(content.chapters[min(position.chapter, content.chapters.count - 1)].title).name)
+                miniAutoControl(autoMode)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
@@ -301,6 +307,11 @@ struct ReaderView: View {
 
     /// 正文边距。宽度取整到「一行正好 N 个字」，高度取整到「一页正好 N 行」，
     /// 这样每行字距一致、行与行对齐。iPad 上另外限制一行的宽度。
+    /// 页脚那一行（章名、页码/进度、时间）的中线离屏幕底边多远；与翻页模式里每页的页脚算法一致。
+    static func footerCenter(safeBottom: CGFloat) -> CGFloat {
+        max(safeBottom, 20) + 14
+    }
+
     /// 当前的正文边距（与阅读区里实际排版用的同一套算法）
     private var readerInsets: UIEdgeInsets {
         guard viewportSize.width > 0 else { return UIEdgeInsets(top: 86, left: 31, bottom: 80, right: 31) }
@@ -447,43 +458,13 @@ struct ReaderView: View {
     /// 底部胶囊：点图标在它上方弹出卡片。
     @ViewBuilder
     private func capsuleMenu(content: BookContent, current: Int, paper: Color) -> some View {
-        // 卡片本身只在打开、收起时出现和消失；在目录、显示、自动阅读之间切换时卡片一直在，
-        // 只是高度平滑地变到新内容的高度，旧内容先淡出、新内容随后淡入，都裁在卡片里。
-        if let panel {
-            ZStack(alignment: .top) {
-                panelContent(panel, content: content, current: current, paper: paper)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .id(panel)
-                    .transition(.asymmetric(
-                        insertion: .opacity.animation(.easeOut(duration: 0.22).delay(0.08)),
-                        removal: .opacity.animation(.easeOut(duration: 0.1))
-                    ))
-                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
-                        // 正在淡出的旧内容不再左右卡片高度。
-                        guard self.panel == panel else { return }
-                        if let old = cardHeight, abs(old - height) > 0.5 {
-                            withAnimation(.spring(duration: 0.38, bounce: 0.06)) { cardHeight = height }
-                        } else if cardHeight == nil {
-                            cardHeight = height
-                        }
-                    }
-            }
-            .frame(maxWidth: 440)
-            .frame(height: cardHeight, alignment: .top)
-            .clipShape(.rect(cornerRadius: 26))
-            .paperGlass(paper, in: .rect(cornerRadius: 26))
-            .environment(\.readerCardChromeless, true)
-            .padding(.horizontal, 16)
-            // 卡片从底部胶囊那里长出来，收起时缩回去。透明只在最开头一闪而过，
-            // 免得玻璃半透明的那一段时间里，下面的正文透上来和卡片里的字叠在一起。
-            .transition(.scale(scale: 0.86, anchor: .bottom)
-                .combined(with: .offset(y: 10))
-                .combined(with: .opacity.animation(.easeOut(duration: 0.1))))
-            .onDisappear { cardHeight = nil }
-        }
-
+        // 卡片挂在胶囊上方（overlay），不参与外层排版：打开卡片时外层高度不变，
+        // 卡片就不会被外层「长高」的动画从胶囊下面带着往上滑，只在原地从按钮里鼓出来。
         ReaderToolbar(
-            panel: $panel,
+            panel: Binding(get: { panel }, set: { new in
+                cardSwitching = panel != nil && new != nil
+                panel = new
+            }),
             isBookmarked: bookmarkHere != nil,
             autoMode: autoMode,
             paper: paper,
@@ -491,6 +472,47 @@ struct ReaderView: View {
                 withAnimation(.spring(duration: 0.3)) { toggleBookmark(content: content) }
             }
         )
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .bottom) {
+            // 卡片本身只在打开、收起时出现和消失；在目录、显示、自动阅读之间切换时卡片一直在，
+            // 只是高度平滑地变到新内容的高度，旧内容先淡出、新内容随后淡入，都裁在卡片里。
+            if let panel {
+                ZStack(alignment: .top) {
+                    panelContent(panel, content: content, current: current, paper: paper)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .id(panel)
+                        .transition(cardSwitching
+                            ? .asymmetric(insertion: .opacity.animation(.easeOut(duration: 0.2).delay(0.06)),
+                                          removal: .opacity.animation(.easeOut(duration: 0.1)))
+                            : .identity)
+                        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height in
+                            // 正在淡出的旧内容不再左右卡片高度。
+                            guard self.panel == panel else { return }
+                            if let old = cardHeight, abs(old - height) > 0.5 {
+                                withAnimation(.spring(duration: 0.38, bounce: 0.06)) { cardHeight = height }
+                            } else if cardHeight == nil {
+                                cardHeight = height
+                            }
+                        }
+                }
+                .frame(maxWidth: 440)
+                .frame(height: cardHeight, alignment: .top)
+                .clipShape(.rect(cornerRadius: 26))
+                .paperGlass(paper, in: .rect(cornerRadius: 26))
+                .environment(\.readerCardChromeless, true)
+                .padding(.horizontal, 16)
+                .fixedSize(horizontal: false, vertical: true)
+                // 从被点的那个按钮里鼓出来，收起时缩回那个按钮；底边停在胶囊上方 12 点（胶囊高 52）。
+                .transition(.cardBloom(anchor: cardAnchor(for: panel), lift: 52 + 12))
+                .onDisappear { cardHeight = nil }
+            }
+        }
+    }
+
+    /// 卡片底边上、正对着某个按钮的那一点（卡片最宽 440，左右各留 16）
+    private func cardAnchor(for panel: ReaderPanel) -> UnitPoint {
+        let width = min(440, max(viewportSize.width - 32, 1))
+        return UnitPoint(x: 0.5 + ReaderToolbar.buttonOffset(of: panel) / width, y: 1)
     }
 
     @ViewBuilder
@@ -631,21 +653,19 @@ struct ReaderView: View {
         }
     }
 
-    /// 菜单收起时，左下角页脚里的小胶囊：显示模式和速度，点速度弹出拨盘，点 ■ 停止；章名紧跟在它后面。
-    private func miniAutoControl(_ mode: AutoMode, chapterTitle: String) -> some View {
-        HStack(spacing: 10) {
-            miniAutoPill(mode)
-            Text(chapterTitle)
-                .font(.serif(11))
-                .foregroundStyle(Color(style.secondary))
-                .lineLimit(1)
-        }
+    /// 菜单收起时，左下角页脚里的小胶囊：显示模式和速度，点速度弹出拨盘，点 ■ 停止。
+    private func miniAutoControl(_ mode: AutoMode) -> some View {
+        // 只放小胶囊，不跟章名：右边是进度和时间，胶囊的中线和它们平齐。
+        miniAutoPill(mode)
+            .fixedSize()
         // 与页脚那一行（章名、页码）对齐。
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
         // 和正文左边对齐（胶囊自带一点内边距，往外让一些）；iPad 横屏正文居中时不会孤零零地贴在屏幕边上。
         .padding(.leading, max(22, readerInsets.left - 8))
-        .padding(.trailing, 80)
-        .padding(.bottom, 33)
+        // 右边留给页脚的进度和时间（滚动模式）或页码和时间（翻页模式）。
+        .padding(.trailing, max(130, readerInsets.right + 110))
+        // 胶囊（高约 30）的中线与页脚那一行的中线对齐：离底边 max(安全区, 20) + 14。
+        .padding(.bottom, Self.footerCenter(safeBottom: safeInsets.bottom) - 15)
         .ignoresSafeArea()
     }
 
@@ -1079,18 +1099,21 @@ private struct ScrollEdges: View {
     let background: Color
     /// 正文区的上下边距：只在边距里渐隐，正文第一行和最后一行完整可见
     let insets: UIEdgeInsets
+    /// 顶部安全区：灵动岛那一行（返回按钮在这里）始终是实底，滚上去的字不会从按钮后面透出来
+    var safeTop: CGFloat = 0
 
     var body: some View {
         let fade: CGFloat = 26
+        let topSolid = min(max(insets.top - fade, safeTop + 10), insets.top - 12)
         VStack(spacing: 0) {
-            background.frame(height: max(insets.top - fade, 0))
+            background.frame(height: max(topSolid, 0))
             LinearGradient(colors: [background, background.opacity(0)], startPoint: .top, endPoint: .bottom)
-                .frame(height: fade)
+                .frame(height: insets.top - max(topSolid, 0))
             Spacer()
             LinearGradient(colors: [background.opacity(0), background], startPoint: .top, endPoint: .bottom)
                 .frame(height: fade)
             // 底下至少盖住页脚那一行（离底边 33 点起），文字不会从章名、进度后面透出来。
-            background.frame(height: max(insets.bottom - fade, 52))
+            background.frame(height: max(insets.bottom - fade, 60))
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -1151,16 +1174,29 @@ private struct ScrollFooter: View {
     let color: Color
     /// 与正文左右对齐
     var side: CGFloat = 31
+    /// 左边的章名（自动滚动时让给小胶囊）
+    var showsTitle = true
+    /// 文字底边离屏幕底边多远（让这一行和翻页模式的页脚、自动阅读小胶囊在同一条线上）
+    var bottom: CGFloat = 33
 
     var body: some View {
         HStack {
             Text(chapterTitle)
                 .lineLimit(1)
                 .contentTransition(.opacity)
+                .opacity(showsTitle ? 1 : 0)
+                .animation(.easeOut(duration: 0.2), value: showsTitle)
             Spacer(minLength: 12)
             Text(progress)
                 .monospacedDigit()
                 .contentTransition(.numericText())
+            // 右下角的时间（只有时、分），整分钟时刷新。
+            TimelineView(.everyMinute) { context in
+                Text(ReaderClock.text(context.date))
+                    .monospacedDigit()
+            }
+            .padding(.leading, 4)
+            .accessibilityLabel("当前时间")
         }
         .font(.serif(11))
         .foregroundStyle(color)
@@ -1168,7 +1204,7 @@ private struct ScrollFooter: View {
         .animation(.easeInOut(duration: 0.3), value: chapterTitle)
         .frame(maxHeight: .infinity, alignment: .bottom)
         .padding(.horizontal, side)
-        .padding(.bottom, 33)
+        .padding(.bottom, bottom)
         .ignoresSafeArea()
         .allowsHitTesting(false)
     }

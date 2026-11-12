@@ -99,6 +99,9 @@ final class PageStripView: UIView {
     // 手势
     private let pan = UIPanGestureRecognizer()
     private let tap = UITapGestureRecognizer()
+    /// 页脚右下角的时间：固定在屏幕上，翻页时不跟着页面滑走（像状态栏一样），整分钟时更新。
+    private let clockLabel = UILabel()
+    private var clockTimer: Timer?
     /// 这次触摸按下的位置。点击在抬手时才触发，用它分辨「真的点了一下」和「划得太短、没被认成拖动的一下」。
     private var touchDown: CGPoint?
     private var dragStart: CGFloat = 0
@@ -130,6 +133,25 @@ final class PageStripView: UIView {
         tap.delegate = self
         addGestureRecognizer(pan)
         addGestureRecognizer(tap)
+        clockLabel.font = ReaderClock.font
+        clockLabel.textAlignment = .right
+        clockLabel.isUserInteractionEnabled = false
+        clockLabel.accessibilityLabel = "当前时间"
+        // 两栏翻书时纸张用 zPosition 叠放（翻动的那张在 2、3），时间要在它们之上。
+        clockLabel.layer.zPosition = 10
+        addSubview(clockLabel)
+        tickClock()
+    }
+
+    /// 刷新时间，并约好下一个整分钟再刷新。
+    private func tickClock() {
+        clockTimer?.invalidate()
+        let now = Date.now
+        clockLabel.text = ReaderClock.text(now)
+        let next = Calendar.current.nextDate(after: now, matching: DateComponents(second: 0), matchingPolicy: .nextTime) ?? now.addingTimeInterval(60)
+        let timer = Timer(fire: next.addingTimeInterval(0.05), interval: 0, repeats: false) { [weak self] _ in self?.tickClock() }
+        RunLoop.main.add(timer, forMode: .common)
+        clockTimer = timer
     }
 
     @available(*, unavailable)
@@ -141,6 +163,7 @@ final class PageStripView: UIView {
 
     func update(_ new: PagedReader) {
         parent = new
+        clockLabel.textColor = new.style.secondary
         if handledTurns == nil { handledTurns = new.forwardTurns }
         guard isActive, !new.content.chapters.isEmpty,
               new.size.width > new.insets.left + new.insets.right,
@@ -181,6 +204,7 @@ final class PageStripView: UIView {
         guard isActive else { return }
         isActive = false
         stopSpring()
+        clockTimer?.invalidate(); clockTimer = nil
         jumpSnapshot?.removeFromSuperview(); jumpSnapshot = nil
         endInteraction(deferred: true)
     }
@@ -188,6 +212,14 @@ final class PageStripView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         layoutPages()
+        if let parent {
+            // 与页脚的页码同一行，右边对齐正文右缘。
+            let footerY = bounds.height - max(safeAreaInsets.bottom, 20) - 22
+            let clockWidth = ReaderClock.reserve
+            clockLabel.frame = CGRect(x: bounds.width - parent.insets.right - clockWidth, y: footerY, width: clockWidth, height: 16)
+        }
+        bringSubviewToFront(clockLabel)
+        if let snapshot = jumpSnapshot { bringSubviewToFront(snapshot) }
     }
 
     // MARK: 排版与页的查找
@@ -290,6 +322,7 @@ final class PageStripView: UIView {
             // 只有正在移动的页才投一道浅影，分出前后两页的边界。
             view.layer.shadowOpacity = abs(originX) > 0.5 && abs(originX) < bounds.width - 0.5 ? 0.08 : 0
         }
+        bringSubviewToFront(clockLabel)
         if let snapshot = jumpSnapshot { bringSubviewToFront(snapshot) }
     }
 
@@ -357,6 +390,7 @@ final class PageStripView: UIView {
         for view in subviews.compactMap({ $0 as? HalfPageView }).sorted(by: { $0.layer.zPosition < $1.layer.zPosition }) {
             bringSubviewToFront(view)
         }
+        bringSubviewToFront(clockLabel)
         if let snapshot = jumpSnapshot { bringSubviewToFront(snapshot) }
     }
 
@@ -415,6 +449,8 @@ final class PageStripView: UIView {
             // 旧页淡出，新页已经在下面摆好。
             snapshot.frame = bounds
             snapshot.isUserInteractionEnabled = false
+            // 盖在两栏纸张（zPosition 0…3）之上，淡出时整屏一起淡。
+            snapshot.layer.zPosition = 20
             addSubview(snapshot)
             jumpSnapshot = snapshot
             UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
@@ -464,6 +500,7 @@ final class PageStripView: UIView {
         recenter(); layoutPages()
         if let snapshot {
             snapshot.frame = bounds
+            snapshot.layer.zPosition = 20
             addSubview(snapshot)
             UIView.animate(withDuration: 0.15) { snapshot.alpha = 0 } completion: { _ in snapshot.removeFromSuperview() }
         }
@@ -766,7 +803,8 @@ final class PageView: UIView {
         // 页脚固定贴在屏幕底部（Home 条上方），不随正文行数上下浮动。
         let footerY = bounds.height - max(safeAreaInsets.bottom, 20) - 22
         chapterLabel.frame = CGRect(x: insets.left, y: footerY, width: width * 0.7, height: 16)
-        pageLabel.frame = CGRect(x: insets.left + width * 0.7, y: footerY, width: width * 0.3, height: 16)
+        // 右边留出固定在屏幕上的时间那一块（时间不随页面滑动）。
+        pageLabel.frame = CGRect(x: insets.left + width * 0.7, y: footerY, width: width * 0.3 - ReaderClock.reserve, height: 16)
         layer.shadowPath = UIBezierPath(rect: bounds).cgPath
     }
 }
@@ -845,7 +883,8 @@ final class HalfPageView: UIView {
         let textX = side == .left ? insets.left : gap / 2
         textView?.frame = CGRect(x: textX, y: insets.top, width: column, height: bounds.height - insets.top - insets.bottom)
         let footerY = bounds.height - max(safeAreaInsets.bottom, 20) - 22
-        footer.frame = CGRect(x: textX, y: footerY, width: column, height: 16)
+        // 右页的页码让出右下角的时间。
+        footer.frame = CGRect(x: textX, y: footerY, width: column - (side == .right ? ReaderClock.reserve : 0), height: 16)
         let spineWidth: CGFloat = 28
         spine.frame = CGRect(x: side == .left ? bounds.width - spineWidth : 0, y: 0, width: spineWidth, height: bounds.height)
         shadeView.frame = bounds
@@ -857,5 +896,21 @@ private extension UIColor {
         var white: CGFloat = 0
         getWhite(&white, alpha: nil)
         return white < 0.5
+    }
+}
+
+/// 阅读器页脚里的时间：只有时和分（不带日期，也不带「上午/下午」），跟随系统 12/24 小时制。宋体小字。
+enum ReaderClock {
+    static let font = UIFont(name: "NotoSerifSC-Regular", size: 11) ?? .systemFont(ofSize: 11)
+
+    static func text(_ date: Date) -> String {
+        date.formatted(.dateTime.hour(.defaultDigits(amPM: .omitted)).minute(.twoDigits))
+    }
+
+    /// 时间占的宽度（含与页码之间的空隙），按最宽的「12:58」量。
+    static var reserve: CGFloat {
+        let sample = Calendar.current.date(bySettingHour: 12, minute: 58, second: 0, of: .now) ?? .now
+        let width = (text(sample) as NSString).size(withAttributes: [.font: font]).width
+        return ceil(width) + 14
     }
 }

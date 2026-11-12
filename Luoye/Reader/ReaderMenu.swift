@@ -82,10 +82,28 @@ struct ReaderToolbar: View {
         .sensoryFeedback(.selection, trigger: panel)
     }
 
+    /// 胶囊里第几个按钮（卡片从它那里长出来）
+    static func index(of panel: ReaderPanel) -> Int {
+        switch panel {
+        case .contents: 0
+        case .display: 1
+        case .auto: 2
+        }
+    }
+
+    /// 按钮中心离胶囊中心多远（4 个 52 宽的按钮，间距 2，两边各 4）
+    static func buttonOffset(of panel: ReaderPanel) -> CGFloat {
+        CGFloat(index(of: panel)) * 54 - 81
+    }
+
     private func item(_ target: ReaderPanel, @ViewBuilder label: () -> some View) -> some View {
         let selected = panel == target
         return Button {
-            withAnimation(.spring(duration: 0.32)) { panel = selected ? nil : target }
+            // 打开：带一点回弹地从按钮里鼓出来；换卡片：平稳地变高变矮；收起：利落地缩回去。
+            let animation: Animation = selected ? .spring(duration: 0.26, bounce: 0)
+                : panel == nil ? .spring(duration: 0.44, bounce: 0.26)
+                : .spring(duration: 0.34, bounce: 0.08)
+            withAnimation(animation) { panel = selected ? nil : target }
         } label: {
             label()
                 .frame(width: 52, height: 44)
@@ -99,6 +117,35 @@ struct ReaderToolbar: View {
                 .contentShape(.capsule)
         }
         .accessibilityLabel(target == .contents ? "目录与书签" : target == .display ? "显示设置" : "自动阅读")
+    }
+}
+
+/// 底部卡片打开、收起：从被点的那个按钮里鼓出来，先宽后高地舒展开，带一点回弹；收起时原路缩回按钮。
+private struct CardBloom: ViewModifier, Animatable {
+    /// 0 是缩在按钮里，1 是完全展开。逐帧按它算缩放和透明度（不让 SwiftUI 把两者各自线性插值，
+    /// 否则卡片会长时间半透明，底下的正文透上来；锚点也会漂）。
+    var progress: CGFloat
+    let anchor: UnitPoint
+    /// 缩放之后整体上移多少（卡片挂在胶囊上方）。放在这里做，上移量本身不会跟着被缩放。
+    let lift: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(x: 0.22 + 0.78 * progress, y: 0.12 + 0.88 * progress, anchor: anchor)
+            .offset(y: -lift)
+            // 一开始就几乎不透明：玻璃半透明的那一刻，下面的正文不会透上来和卡片里的字叠在一起。
+            .opacity(min(1, progress * 4))
+    }
+}
+
+extension AnyTransition {
+    static func cardBloom(anchor: UnitPoint, lift: CGFloat = 0) -> AnyTransition {
+        .modifier(active: CardBloom(progress: 0, anchor: anchor, lift: lift), identity: CardBloom(progress: 1, anchor: anchor, lift: lift))
     }
 }
 
