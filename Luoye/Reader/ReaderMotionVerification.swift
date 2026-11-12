@@ -160,6 +160,38 @@ import UIKit
         scrollCoordinator.scrollViewDidEndDragging(scroll, willDecelerate: false)
         check(dragEvents == [true, false, true, false], "a swipe without deceleration resumes on release")
         scrollCoordinator.stopTicking(); scroll.delegate = nil
+
+        // 长章后面跟着几段很短的章节（作者的话、请假条）连续往下读：前面的章节被拿掉、整体上移时，眼前的文字不能往回跳。
+        let shortChapters = (0..<40).map { Chapter(id: $0, title: "第\($0)章", paragraphs: Array(repeating: "长短交错的章节，连续往下滑，中途会不断拿掉前面已经读过的章节。", count: $0.isMultiple(of: 4) ? 70 : 3)) }
+        let shortContent = BookContent(chapters: shortChapters, image: { _ in nil })
+        let shortPosition = Position()
+        let shortReader = ScrollReader(content: shortContent, style: style, size: CGSize(width: 390, height: 800), insets: parent.insets,
+                                       position: Binding(get: { shortPosition.value }, set: { shortPosition.value = $0 }), speed: 0, onTap: {}, onReachEnd: {})
+        let shortCoordinator = shortReader.makeCoordinator(), shortScroll = UIScrollView(frame: CGRect(x: 0, y: 0, width: 390, height: 800))
+        shortCoordinator.scrollView = shortScroll; shortScroll.delegate = shortCoordinator
+        shortCoordinator.refresh()
+        func visibleAnchor() -> (chapter: String, y: CGFloat)? {
+            let views = shortScroll.subviews.compactMap { $0 as? UITextView }.sorted { $0.frame.minY < $1.frame.minY }
+            guard let view = views.last(where: { $0.frame.minY <= shortScroll.contentOffset.y + 1 }) ?? views.first else { return nil }
+            return (view.text.components(separatedBy: "\n").first ?? "", shortScroll.contentOffset.y - view.frame.minY)
+        }
+        var jumpedBack = false, steps = 0
+        var last = visibleAnchor()
+        for _ in 0 ..< 2000 {
+            // 手指滑不出全书末尾（会回弹），到底就停。
+            guard shortScroll.contentOffset.y + 37 <= shortScroll.contentSize.height - shortScroll.bounds.height else { break }
+            shortScroll.contentOffset.y += 37
+            shortCoordinator.scrollViewDidScroll(shortScroll)
+            steps += 1
+            guard let now = visibleAnchor(), let before = last else { continue }
+            let beforeIndex = Int(before.chapter.dropFirst().prefix { $0.isNumber }) ?? 0
+            let nowIndex = Int(now.chapter.dropFirst().prefix { $0.isNumber }) ?? 0
+            if nowIndex < beforeIndex || (nowIndex == beforeIndex && now.y < before.y - 0.5) { jumpedBack = true; print("READER_MOTION jump back at step \(steps): \(before) -> \(now)"); break }
+            last = now
+        }
+        let reached = Int((last?.chapter ?? "").dropFirst().prefix { $0.isNumber }) ?? 0
+        check(!jumpedBack && reached > 20, "reading forward through short chapters never jumps back when old chapters are dropped")
+        shortScroll.delegate = nil
         let report: [String: Any] = ["success": checks.allSatisfy { $0["passed"] as? Bool == true }, "checks": checks]
         if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: FileManager.default.temporaryDirectory.appending(path: "LuoyeReaderMotionVerification.json"), options: .atomic) }
     }

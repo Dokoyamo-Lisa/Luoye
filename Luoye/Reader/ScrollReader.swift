@@ -178,8 +178,16 @@ struct ScrollReader: UIViewRepresentable {
         private func shift(by delta: CGFloat) {
             guard let scrollView else { return }
             for section in sections { section.view.frame.origin.y += delta }
-            updateContentSize()
-            scrollView.contentOffset.y += delta
+            // 先后顺序很要紧：UIScrollView 缩小 contentSize 时会立刻把越界的 contentOffset 夹回末尾。
+            // 拿掉前面的章节（整体上移）时若先缩高度，位置先被夹回去、再减去位移，就会一下跳回前面的章节。
+            // 所以上移时先挪位置再缩高度；下移（在前面接上一章）时先加高度再挪位置。
+            if delta < 0 {
+                scrollView.contentOffset.y += delta
+                updateContentSize()
+            } else {
+                updateContentSize()
+                scrollView.contentOffset.y += delta
+            }
         }
 
         /// 快滚到已铺内容的底部时，接上下一章；快滚到顶部时，在上面接上前一章。
