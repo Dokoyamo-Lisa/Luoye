@@ -814,7 +814,7 @@ final class HalfPageView: UIView {
         }
         if let textView { addSubview(textView) }
         addSubview(footer)
-        let dark = UIColor.black.withAlphaComponent(style.background.isDark ? 0.22 : 0.07).cgColor
+        let dark = UIColor.black.withAlphaComponent(style.background.isDark ? 0.16 : 0.07).cgColor
         let clear = UIColor.black.withAlphaComponent(0).cgColor
         spine.colors = side == .left ? [clear, dark] : [dark, clear]
         spine.startPoint = CGPoint(x: 0, y: 0.5)

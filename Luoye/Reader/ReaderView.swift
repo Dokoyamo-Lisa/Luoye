@@ -56,6 +56,8 @@ struct ReaderView: View {
     @State private var noteText: String?
     /// 阅读页的安全区。iPhone 有灵动岛和较高的底部横条，iPad 隐藏状态栏后顶部几乎没有，菜单位置要按它算。
     @State private var safeInsets = EdgeInsets()
+    /// 整个阅读区（含安全区）的大小；滚动模式的上下渐隐、页脚按它算出的正文边距摆放
+    @State private var viewportSize = CGSize.zero
     @Query private var bookmarks: [Bookmark]
 
     /// 从书籍详情的目录点进来时要直接打开的章节：章名，以及它在网页目录里的序号（按章名找不到时用）
@@ -205,11 +207,11 @@ struct ReaderView: View {
                     AutoPageLine(start: pageShownAt, interval: pageSeconds)
                 }
                 if usesScroll {
-                    ScrollEdges(background: Color(style.background))
+                    ScrollEdges(background: Color(style.background), insets: readerInsets)
                 }
                 if usesScroll, autoMode == nil {
                     ScrollFooter(chapterTitle: ChapterTitle.parts(content.chapters[min(position.chapter, content.chapters.count - 1)].title).name,
-                                 progress: progressText(content), color: Color(style.secondary))
+                                 progress: progressText(content), color: Color(style.secondary), side: readerInsets.left)
                 }
             } else if failed {
                 VStack(spacing: 10) {
@@ -257,6 +259,10 @@ struct ReaderView: View {
         }
         // 菜单、目录也跟着正文配色走。总是给出明确的深浅色，不传 nil（传 nil 有时恢复不了）。
         .onGeometryChange(for: EdgeInsets.self) { $0.safeAreaInsets } action: { safeInsets = $0 }
+        .onGeometryChange(for: CGSize.self) { proxy in
+            CGSize(width: proxy.size.width + proxy.safeAreaInsets.leading + proxy.safeAreaInsets.trailing,
+                   height: proxy.size.height + proxy.safeAreaInsets.top + proxy.safeAreaInsets.bottom)
+        } action: { viewportSize = $0 }
         .modifier(ReaderMotionScope())
         .preferredColorScheme(scheme)
         .eyeCareFilter()
@@ -295,6 +301,12 @@ struct ReaderView: View {
 
     /// 正文边距。宽度取整到「一行正好 N 个字」，高度取整到「一页正好 N 行」，
     /// 这样每行字距一致、行与行对齐。iPad 上另外限制一行的宽度。
+    /// 当前的正文边距（与阅读区里实际排版用的同一套算法）
+    private var readerInsets: UIEdgeInsets {
+        guard viewportSize.width > 0 else { return UIEdgeInsets(top: 86, left: 31, bottom: 80, right: 31) }
+        return pageInsets(size: viewportSize, safe: safeInsets, spread: usesSpread(size: viewportSize))
+    }
+
     /// 书脊两侧正文之间的留白
     private static let spreadGap: CGFloat = 96
 
@@ -630,7 +642,8 @@ struct ReaderView: View {
         }
         // 与页脚那一行（章名、页码）对齐。
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-        .padding(.leading, 22)
+        // 和正文左边对齐（胶囊自带一点内边距，往外让一些）；iPad 横屏正文居中时不会孤零零地贴在屏幕边上。
+        .padding(.leading, max(22, readerInsets.left - 8))
         .padding(.trailing, 80)
         .padding(.bottom, 33)
         .ignoresSafeArea()
@@ -1064,16 +1077,20 @@ private struct TabTitleStyle: ViewModifier, Animatable {
 /// 顶部先实底遮住灵动岛一带再渐隐；底部同理，页脚（章名、进度、自动阅读胶囊）落在实底上，不与正文相叠。
 private struct ScrollEdges: View {
     let background: Color
+    /// 正文区的上下边距：只在边距里渐隐，正文第一行和最后一行完整可见
+    let insets: UIEdgeInsets
 
     var body: some View {
+        let fade: CGFloat = 26
         VStack(spacing: 0) {
-            background.frame(height: 72)
+            background.frame(height: max(insets.top - fade, 0))
             LinearGradient(colors: [background, background.opacity(0)], startPoint: .top, endPoint: .bottom)
-                .frame(height: 56)
+                .frame(height: fade)
             Spacer()
             LinearGradient(colors: [background.opacity(0), background], startPoint: .top, endPoint: .bottom)
-                .frame(height: 56)
-            background.frame(height: 76)
+                .frame(height: fade)
+            // 底下至少盖住页脚那一行（离底边 33 点起），文字不会从章名、进度后面透出来。
+            background.frame(height: max(insets.bottom - fade, 52))
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
@@ -1132,6 +1149,8 @@ private struct ScrollFooter: View {
     let chapterTitle: String
     let progress: String
     let color: Color
+    /// 与正文左右对齐
+    var side: CGFloat = 31
 
     var body: some View {
         HStack {
@@ -1148,7 +1167,7 @@ private struct ScrollFooter: View {
         .animation(.smooth(duration: 0.3), value: progress)
         .animation(.easeInOut(duration: 0.3), value: chapterTitle)
         .frame(maxHeight: .infinity, alignment: .bottom)
-        .padding(.horizontal, 31)
+        .padding(.horizontal, side)
         .padding(.bottom, 33)
         .ignoresSafeArea()
         .allowsHitTesting(false)
